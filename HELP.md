@@ -38,12 +38,17 @@ screen confuses you, this document is the place to look.
 10. [Reverse parse — what `Ctrl+Shift+G` actually does](#10-reverse-parse--what-ctrlshiftg-actually-does)
 11. [The embedded Lua simulator in detail](#11-the-embedded-lua-simulator-in-detail)
 12. [Bundled official scripts](#12-bundled-official-scripts)
-13. [Keyboard shortcuts](#13-keyboard-shortcuts)
-14. [Settings, recent files, and persistence](#14-settings-recent-files-and-persistence)
-15. [Portable Windows build](#15-portable-windows-build)
-16. [Troubleshooting / FAQ](#16-troubleshooting--faq)
-17. [Known limitations](#17-known-limitations)
-18. [Glossary](#18-glossary)
+13. [Beginner mode and the new-pattern wizard](#13-beginner-mode-and-the-new-pattern-wizard)
+14. [Pre-flight check](#14-pre-flight-check)
+15. [Explain this script](#15-explain-this-script)
+16. [▶ Test buttons on menu items](#16--test-buttons-on-menu-items)
+17. [Auto-save and draft recovery](#17-auto-save-and-draft-recovery)
+18. [Keyboard shortcuts](#18-keyboard-shortcuts)
+19. [Settings, recent files, and persistence](#19-settings-recent-files-and-persistence)
+20. [Portable Windows build](#20-portable-windows-build)
+21. [Troubleshooting / FAQ](#21-troubleshooting--faq)
+22. [Known limitations](#22-known-limitations)
+23. [Glossary](#23-glossary)
 
 ---
 
@@ -486,6 +491,27 @@ For each of the 4 channels the panel shows:
 - **pwr=N** — last `zc.SetPower(ch, N)` value.
 - When ON: also `freqHz` and `pulse_width_us`.
 
+### Menu controls (live)
+
+Below the channel state row, a section *Menu controls (live)* appears
+whenever the form has at least one MIN_MAX or MULTI_CHOICE item:
+
+- **MIN_MAX** items get a horizontal slider (range = `[min, max]`,
+  step = `increment_step`, starting at `default`) plus a numeric readout.
+- **MULTI_CHOICE** items get a combobox listing every choice.
+
+Moving a slider or picking a choice fires the matching
+`MinMaxChange(menu_id, val)` / `MultiChoiceChange(menu_id, choice_id)`
+callback **immediately**, before the next Loop tick. The simulator
+captures any `print()` output and channel state change. This lets you
+test how your script reacts to the user turning the device knob without
+flashing.
+
+If the script doesn't react when you move the slider, you've probably:
+- forgotten to tick the corresponding callback in **Functions**, or
+- forgotten the `if (menu_id == N) then ... end` branch for that ID
+  inside the callback's body.
+
 ### Timeline
 
 - 4 horizontal lanes (CH1 to CH4).
@@ -584,6 +610,22 @@ stripped) and verifies argument ranges:
 | `require("xxx")` for `xxx ≠ "ettot"` | Info | "provided by the ZC95 firmware but not by the embedded simulator." |
 | No top-level `function Loop(` | Warning | "No top-level Loop(time_ms) found." |
 
+### Rules — safety guardrails
+
+These rules don't catch Lua bugs — they catch *comfort* and *electrical
+safety* problems. They are deliberately conservative and silenceable by
+tightening the offending value.
+
+| Condition | Severity | Message |
+|----|----|----|
+| `zc.SetFrequency(*, hz)` with `hz > 250` | Warning | "frequencies above 250 Hz can feel harsh" |
+| `zc.SetPulseWidth(*, p, n)` with `max(p, n) > 200` | Warning | "pulse widths above 200 µs deliver a lot of charge" |
+| `zc.SetPower(*, X)` with `X ≥ 800` and **no** MIN_MAX menu item exists | Warning | "hard-coded high power and no slider to dial it down" |
+| Script defines no `SoftButton`, no `ExternalTrigger`, and no MULTI_CHOICE menu | Warning | "no software kill-switch in this pattern" |
+| `zc.EnableTriphase(true)` present and `allow_triphase` ticked | Info | "channel isolation OFF — pay attention to electrode placement" |
+| `function Loop(` exists but **no** `zc.*` call anywhere | Info | "the pattern won't drive any channel — empty body?" |
+| `zc.SetPower(*, X≥800)` inside `Loop()` with no `if` around it | Warning | "unconditional SetPower runs every tick — wrap it in `if` or move to Setup()" |
+
 `require("ettot")` is silently allowed because the application bundles
 `ettot.lua` as a Qt resource; the simulator's custom searcher resolves
 it.
@@ -642,6 +684,16 @@ it.
 
 Use `Ctrl+G` for normal iteration, `Ctrl+Shift+Alt+G` for "I want to
 start over but keep my Config".
+
+### Diff dialog
+
+After every `Ctrl+G` that changes anything, a dialog opens showing a
+side-by-side diff with **green** for added lines and **red** for removed
+ones. This is the easiest way to confirm "smart merge actually preserved
+my function bodies" the first time you try it.
+
+A *Don't show this dialog again* checkbox silences it; toggle it back on
+via `View → Show diff after regenerate`.
 
 ---
 
@@ -798,11 +850,191 @@ patterns.
 
 ---
 
-## 13. Keyboard shortcuts
+## 13. Beginner mode and the new-pattern wizard
+
+### Beginner mode
+
+`View → Beginner mode` toggles a simplified UI:
+
+- **Config** tab: hides `Loop frequency (Hz)`, `Allow triphase`,
+  `Bluetooth remote passthrough`.
+- **Functions** tab: hides `ExternalTrigger`, `BluetoothRemoteKeypress`,
+  `BluetoothHidEvent`, `AudioIntensityChange`.
+- **Presets** menu: hides the four "quick presets" (Toggle, Fire, Waves,
+  Audio — they're skeletons, less polished than the official scripts).
+- A blue `● beginner mode` badge appears in the status bar.
+
+When you enable beginner mode, two safety flags get force-cleared:
+`allow_triphase = false` and `bluetooth_remote_passthrough = false`.
+This is intentional — they're hidden, so they shouldn't silently persist
+in the generated script.
+
+The setting is remembered in `QSettings` between sessions.
+
+### New from wizard…
+
+`File → New from wizard…` (`Ctrl+Shift+N`) opens a 6-step dialog:
+
+1. **Pattern type** — Pulse (recommended), Constant, Fade in/out, Burst,
+   TENS-like.
+2. **Intensity ceiling** — Gentle (max power 400), Medium (700),
+   Strong (1000).
+3. **Cycle duration** — 1-60 seconds.
+4. **Channels** — pick which of CH1..CH4 the pattern drives.
+5. **Kill-switch** — checkbox to add a `STOP` soft button (recommended).
+6. **Review** — read-only summary before generating.
+
+Pressing **Generate** produces:
+
+- A populated form (Config name, audio mode, menu items, callbacks).
+- A complete Lua script in the editor with **French line-by-line
+  comments** explaining every choice.
+- The script is silently loaded into the simulator and the LCD preview
+  is updated.
+
+The generated script is intentionally **safe by default**:
+- The `_intensity` global starts at 0 — the user has to move the slider
+  to get any output.
+- Power is gated by an `Intensity` MIN_MAX item bounded at the chosen
+  ceiling.
+- If kill-switch was ticked, `SoftButton(true)` instantly turns every
+  channel off and resets `_intensity` to 0.
+
+Read the comments before running on real hardware. The generator is a
+starting point, not a finished pattern.
+
+---
+
+## 14. Pre-flight check
+
+`Generate → Pre-flight check` (`Ctrl+Shift+P`) is the recommended
+"is it ready?" step before you save / flash a script.
+
+It runs:
+
+1. The full linter (Config + source + safety rules).
+2. A throwaway `LuaRuntime`:
+   - Loads the script (`luaL_loadbuffer` + `pcall`).
+   - Calls `Setup()`.
+   - Runs 50 ticks of `Loop(time_ms)` at 20ms each (1.0 s simulated time).
+
+Then opens a dialog with:
+
+- A **verdict** banner — `✓ Looks good` (green), `⚠ Mostly OK` (orange),
+  or `❌ Not ready` (red).
+- A **confidence score** 0-100% (-30 per error, -8 per warning, -50/-20/-30
+  for failed load / Setup / Loop).
+- A breakdown table: lint errors, warnings, info, loads-in-Lua, Setup
+  ran, Loop ran 50 times.
+- The simulator stack trace if anything crashed.
+- A reminder that the simulator only validates **logic**, not electrical
+  safety.
+
+A green verdict doesn't mean "safe to use at full intensity" — it means
+"the script doesn't have obvious bugs and runs in the sandbox". Ramp
+up gradually on real hardware regardless.
+
+---
+
+## 15. Explain this script
+
+`Help → Explain this script…` (`Ctrl+Shift+E`) opens a dialog with the
+current editor source rendered as a 3-column table:
+
+- Line number.
+- The original code (monospace, dark background).
+- A plain-English explanation in light blue.
+
+The explanations are produced by a naive pattern-matcher in
+`src/codegen/Explainer.cpp`. It recognises:
+
+- Top-level callback definitions (`function Setup()`, `function Loop()`, …).
+- `zc.*` calls — every function in the API gets a sentence with its
+  arguments interpolated.
+- `for ch = 1, 4`, `while X do`, `if menu_id == N then`,
+  `elseif menu_id == N`, `if pushed`, `if active`, `if time_ms > X`.
+- `local x = …` and bare `_global = …` assignments.
+- `require("foo")`, `module("foo", …)`.
+- `print(…)`.
+- Standalone `then` / `end` / `else` / `do` / `return` / `break`.
+
+Lines that don't match any pattern get an empty note rather than a
+fabricated guess.
+
+This feature is "best-effort" by design — it's an aid, not an
+authoritative translation. Use it to get started reading an unfamiliar
+script (e.g. one of the official presets).
+
+---
+
+## 16. ▶ Test buttons on menu items
+
+In the **Menu Items** tab, the **▶ Test** button (next to Add / Edit /
+Duplicate / Remove) drives the **selected** item's value through a sweep
+and reports whether the script reacts:
+
+1. Switches the right pane to the **Simulator** tab.
+2. Loads the editor source if not already loaded; calls `Setup()` if
+   needed.
+3. Snapshots the 4 channels' state (on/off, power, frequency, pulse
+   width).
+4. For a MIN_MAX item: drives the value through `min → default → max`,
+   running 5 Loop ticks between each change.
+5. For a MULTI_CHOICE item: iterates through every `choice_id`, 5 ticks
+   each.
+6. Snapshots the channels again, compares to the before-snapshot.
+7. Logs `[TEST] Pattern reacted to the value changes — looks wired.`
+   if anything changed, or
+   `[TEST] Pattern did NOT react. Check that MinMaxChange is defined
+   AND that it handles this menu_id.` otherwise.
+
+Use this when you've added a new menu item and want quick confirmation
+the `if (menu_id == N) then ... end` branch is correctly wired.
+
+---
+
+## 17. Auto-save and draft recovery
+
+Every 30 seconds, if the document has unsaved changes, the editor's
+content is dumped to:
+
+```
+<temp>/zc95-lua-builder/autosave-<pid>.lua
+<temp>/zc95-lua-builder/autosave-<pid>.meta   (original path + ISO timestamp)
+```
+
+(`<temp>` is whatever `QStandardPaths::TempLocation` resolves to:
+`%LOCALAPPDATA%\Temp` on Windows, `/tmp` on Linux, …)
+
+When the application starts, it scans this directory for autosave files
+that **don't** belong to the current process ID — those are leftovers
+from a previous (possibly crashed) run. For each one, a dialog opens:
+
+> An unsaved draft was found from a previous session.
+> Original file: …
+> Last saved: 2026-04-30T17:23:11
+> Recover the draft into the editor? [Yes] [No] [Discard]
+
+- **Yes** — load the draft into the editor, parse the form, push to the
+  simulator, mark dirty (so it'll be auto-saved again until you save
+  manually).
+- **No** — leave the file in place; you'll be asked again next launch.
+- **Discard** — delete the file and don't ask again.
+
+On a graceful close (`closeEvent`), the current process's autosave files
+are deleted automatically — only crashes leave drafts behind.
+
+Multiple instances of the application can run simultaneously without
+interfering, because each writes to its own PID-suffixed file.
+
+---
+
+## 18. Keyboard shortcuts
 
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+N` | New script |
+| `Ctrl+Shift+N` | New from wizard… (6-step beginner-friendly generator) |
 | `Ctrl+O` | Open `.lua` |
 | `Ctrl+S` | Save |
 | `Ctrl+Shift+S` | Save As… |
@@ -811,6 +1043,8 @@ patterns.
 | `Ctrl+Shift+Alt+G` | Regenerate from scratch (overwrite, with confirm) |
 | `Ctrl+Shift+G` | Re-parse form from editor |
 | `Ctrl+L` | Run linter |
+| `Ctrl+Shift+P` | Pre-flight check (lint + sim dry-run, scored verdict) |
+| `Ctrl+Shift+E` | Explain this script (plain-English line-by-line) |
 | `Ctrl+R` | Reload editor into simulator |
 | `Ctrl+F` | Find… |
 | `Ctrl+H` | Replace… |
@@ -822,7 +1056,7 @@ patterns.
 
 ---
 
-## 14. Settings, recent files, and persistence
+## 19. Settings, recent files, and persistence
 
 The application uses `QSettings` with organisation `zc95`,
 application `lua-builder`. On Windows that maps to the registry under
@@ -838,13 +1072,16 @@ Persisted values:
 - `recentFiles` — the last 8 file paths that were opened. Oldest are
   dropped automatically. **File → Recent Files → Clear list** wipes
   the list.
+- `beginnerMode` — boolean, persists the View → Beginner mode toggle.
+- `showRegenDiff` — boolean, persists the "show diff after regenerate"
+  preference.
 
 To reset to defaults: close the app, delete the registry key (Windows)
 or the config file (Linux/macOS), reopen.
 
 ---
 
-## 15. Portable Windows build
+## 20. Portable Windows build
 
 Run `_build.bat` then `_deploy.bat`. The result is
 `dist\zc95-lua-builder\` with:
@@ -882,7 +1119,7 @@ instance of the app running from `dist\` — close it first.
 
 ---
 
-## 16. Troubleshooting / FAQ
+## 21. Troubleshooting / FAQ
 
 ### Build issues
 
@@ -952,9 +1189,14 @@ tick.
 that overrode the global `zc` (e.g. a malformed `module()` call). Try
 again with a clean editor.
 
+**`bad argument #2 to 'SetFrequency' (number has no integer
+representation)`** — fixed. The simulator now truncates float arguments
+the same way the device firmware does. Make sure you've rebuilt after
+pulling recent commits.
+
 ---
 
-## 17. Known limitations
+## 22. Known limitations
 
 - **Lua parser is literal**, not evaluating. Expression values become 0.
 - **Long-bracket comments at level ≥ 1** (`--[==[ … ]==]`) aren't
@@ -972,7 +1214,7 @@ again with a clean editor.
 
 ---
 
-## 18. Glossary
+## 23. Glossary
 
 - **Callback** — a Lua function the firmware (or simulator) calls in
   response to an event: `Setup`, `Loop`, `MinMaxChange`,
@@ -1004,6 +1246,19 @@ again with a clean editor.
 - **`_ENV`** — the implicit upvalue holding a chunk's environment in
   Lua 5.2+. The simulator's `module()` polyfill rebinds it on the
   calling chunk to emulate the 5.1 behaviour.
+- **Pre-flight check** — the combined "lint + 1-second simulator
+  dry-run" that scores a script 0-100% before you flash it.
+- **Beginner mode** — UI toggle that hides advanced options (triphase,
+  Bluetooth HID, audio, …) and the "quick presets" submenu.
+- **Wizard** — the 6-step "New from wizard…" dialog that generates a
+  starting script from beginner-friendly multiple-choice answers.
+- **Kill-switch** — any user-visible mechanism to stop the pattern
+  immediately. The linter expects at least one of: a `SoftButton`
+  callback, an `ExternalTrigger` callback, or a MULTI_CHOICE menu item.
+  The front-panel power dial is always available as a hardware fallback.
+- **Autosave / draft** — the 30-second editor backup written to
+  `<temp>/zc95-lua-builder/autosave-<pid>.lua`. Recovered on next
+  launch if the previous session crashed.
 
 ---
 

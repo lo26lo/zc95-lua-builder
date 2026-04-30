@@ -32,17 +32,40 @@ tweak it, and replay it.
 - **Form-driven editor** — fill out the Config, menu items and callbacks in
   tabs; the matching Lua is generated for you.
 - **Smart merge** (`Ctrl+G`) — regenerate only the `Config = {…}` block from
-  the form. Your function bodies are kept verbatim.
-- **Two-way sync** — parse an existing `.lua` back into the form (`Ctrl+Shift+G`).
-  A status-bar badge flips between `● in sync` and `● form/code differ`.
+  the form. Your function bodies are kept verbatim. Optional **diff dialog**
+  shows exactly what was added / removed.
+- **Two-way sync** — parse an existing `.lua` back into the form
+  (`Ctrl+Shift+G`). A status-bar badge flips between `● in sync` and
+  `● form/code differ`.
 - **Embedded Lua 5.4 simulator** — really executes your script. The `zc.*`
-  API is stubbed and emits events that drive a 4-lane timeline.
+  API is stubbed and emits events that drive a 4-lane timeline. **Live
+  sliders / combos** in the simulator drive `MinMaxChange` and
+  `MultiChoiceChange` in real time so you can test the script
+  interactively without flashing.
 - **Lua 5.1 compat** — `module(…)`, `package.seeall` and `require("ettot")`
-  all work in the simulator (the bundled `ettot` library is shipped as a Qt
-  resource and a runtime polyfill rebinds `_ENV` on the calling chunk).
-- **Linter** with 3 severity levels — out-of-range arguments, duplicate menu
-  IDs, audio-mode mismatch, triphase without `allow_triphase`, missing
-  `Loop()`, and more. Double-click an issue to jump to the line.
+  all work in the simulator. Float arguments to `zc.SetFrequency` /
+  `SetPower` / etc. are tolerated (truncated, matching device behavior).
+- **Beginner-friendly** :
+  - **New from wizard…** (`Ctrl+Shift+N`) — 6-step dialog generates a
+    safe starting script with French comments on every line.
+  - **Beginner mode** (`View` menu) — hides advanced options
+    (triphase, Bluetooth HID, audio, …).
+  - **Pedagogical tooltips** — every Hz / µs / power field explains
+    what the value *feels* like, not just its range.
+  - **Explain this script…** (`Ctrl+Shift+E`) — best-effort plain-English
+    line-by-line breakdown of the Lua.
+- **Safety guardrails** :
+  - Linter warns on hard-coded high power, frequencies above 250 Hz,
+    pulse widths above 200 µs, missing kill-switch, runaway `Loop()`
+    bodies, and unconditional triphase enable.
+  - **Pre-flight check** (`Ctrl+Shift+P`) — runs the linter AND a 1-second
+    simulator dry-run, returns a confidence score 0-100%.
+  - **▶ Test** button per menu item — drives the slider through min /
+    default / max and reports whether the script reacted.
+  - **Auto-save** every 30s; recover unsaved drafts after a crash.
+- **Linter** with 3 severity levels — out-of-range arguments, duplicate
+  menu IDs, audio-mode mismatch, triphase without `allow_triphase`,
+  missing `Loop()`, and more. Double-click an issue to jump to the line.
 - **Code editor** — syntax highlighting, line numbers, current-line
   highlight, autocomplete on `Ctrl+Space` and after 2 chars, find/replace
   with case-sensitivity and whole-word options.
@@ -132,6 +155,15 @@ clean Windows machine without a redistributable installer.
 
 ## A 30-second tour
 
+### If you've never written Lua before
+1. `File → New from wizard…` — answer 6 simple questions.
+2. The wizard produces a fully-commented script and fills the form.
+3. Switch to **Simulator**, press **Run** — your pattern is alive.
+4. Move the **Intensity** slider in the simulator's *Menu controls*
+   section — feel the script react in real time.
+5. **Generate → Pre-flight check** — get a verdict before saving.
+
+### If you already know what you want
 1. **Open** `Presets → Official scripts → Climb`.
 2. The form on the left fills in: name, audio mode, menu items.
 3. The `LCD Preview` tab shows what the device screen will look like.
@@ -141,7 +173,7 @@ clean Windows machine without a redistributable installer.
    press **Reset** then **Run** again to compare.
 6. Tweak menu items in the form, press **Ctrl+G** — only the
    `Config = {...}` block is rewritten; your edits in the function bodies
-   are kept.
+   are kept. A diff dialog shows you exactly what changed.
 7. **File → Save As…** to write the `.lua` back out.
 
 ---
@@ -151,12 +183,15 @@ clean Windows machine without a redistributable installer.
 | Shortcut             | Action |
 |----------------------|--------|
 | `Ctrl+N`             | New script |
+| `Ctrl+Shift+N`       | New from wizard… |
 | `Ctrl+O`             | Open `.lua` |
 | `Ctrl+S` / `Ctrl+Shift+S` | Save / Save As |
 | `Ctrl+G`             | Regenerate code from form (smart merge — keeps function bodies) |
 | `Ctrl+Shift+Alt+G`   | Regenerate from scratch (overwrites the editor — confirms first) |
 | `Ctrl+Shift+G`       | Re-parse the form from the editor |
 | `Ctrl+L`             | Run the linter |
+| `Ctrl+Shift+P`       | Pre-flight check (lint + 1-second simulator dry-run) |
+| `Ctrl+Shift+E`       | Explain this script… |
 | `Ctrl+R`             | Reload the editor into the simulator |
 | `Ctrl+F` / `Ctrl+H`  | Find / Replace |
 | `F3` / `Shift+F3`    | Find next / previous |

@@ -21,12 +21,18 @@ MenuItemsPanel::MenuItemsPanel(QWidget* parent) : QWidget(parent) {
     auto* edit = new QPushButton("Edit…", this);
     auto* dup = new QPushButton("Duplicate", this);
     auto* rm = new QPushButton("Remove", this);
+    auto* test = new QPushButton("▶ Test", this);
+    test->setToolTip(
+        "Switch to the Simulator and quickly cycle this item through its\n"
+        "min / default / max values. Detects whether the script reacts at all\n"
+        "— useful to confirm you wired the menu_id in MinMaxChange().");
     auto* up = new QPushButton("↑", this);
     auto* down = new QPushButton("↓", this);
     row->addWidget(add);
     row->addWidget(edit);
     row->addWidget(dup);
     row->addWidget(rm);
+    row->addWidget(test);
     row->addStretch();
     row->addWidget(up);
     row->addWidget(down);
@@ -38,9 +44,16 @@ MenuItemsPanel::MenuItemsPanel(QWidget* parent) : QWidget(parent) {
     connect(edit, &QPushButton::clicked, this, &MenuItemsPanel::editItem);
     connect(dup, &QPushButton::clicked, this, &MenuItemsPanel::duplicateItem);
     connect(rm, &QPushButton::clicked, this, &MenuItemsPanel::removeItem);
+    connect(test, &QPushButton::clicked, this, &MenuItemsPanel::testItem);
     connect(up, &QPushButton::clicked, this, &MenuItemsPanel::moveUp);
     connect(down, &QPushButton::clicked, this, &MenuItemsPanel::moveDown);
     connect(m_list, &QListWidget::itemDoubleClicked, this, &MenuItemsPanel::editItem);
+}
+
+void MenuItemsPanel::testItem() {
+    int r = currentRow();
+    if (r < 0) return;
+    emit testItemRequested(r);
 }
 
 void MenuItemsPanel::load(const QVector<MenuItem>& items) {

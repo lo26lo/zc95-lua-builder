@@ -3,6 +3,7 @@
 #include "model/ScriptConfig.h"
 #include <QMainWindow>
 #include <QStringList>
+#include <QList>
 
 class ConfigPanel;
 class MenuItemsPanel;
@@ -19,6 +20,7 @@ class QTabWidget;
 class QLabel;
 class QMenu;
 class QDockWidget;
+class QAction;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -32,6 +34,7 @@ protected:
 
 private slots:
     void newScript();
+    void newFromWizard();
     void openScript();
     bool saveScript();
     bool saveScriptAs();
@@ -39,12 +42,22 @@ private slots:
     void regenerateFromScratch();// full overwrite (legacy behavior)
     void parseEditorIntoForm();
     void runLinter();
+    void runPreflight();
+    void explainScript();
     void loadCurrentEditorIntoSim();
+    void testMenuItem(int row);
     void loadPreset(const QString& presetName);
     void loadOfficialScript(const QString& resourcePath);
     void about();
     void openRecentFile();
     void clearRecentFiles();
+    void setBeginnerMode(bool beginner);
+    void writeAutosave();
+    void offerAutosaveRecovery();
+    // After loading a script into the simulator, refresh the form's menu
+    // item IDs from Lua's resolved Config (the regex parser can't evaluate
+    // identifiers like MenuId.FREQ, so this fills in the right integers).
+    void fixupFormFromSimulator();
 
 private:
     void buildUi();
@@ -93,4 +106,14 @@ private:
     QString m_currentFile;
     bool m_dirty = false;
     bool m_suppressDirty = false;
+    bool m_beginnerMode = false;
+    QAction* m_beginnerAction = nullptr;
+    QLabel* m_beginnerBadge = nullptr;
+    QList<QAction*> m_quickPresetActions;  // hidden in beginner mode
+
+    // Autosave / draft recovery.
+    class QTimer* m_autosaveTimer = nullptr;
+    QString m_autosavePath;       // <tempdir>/zc95-lua-builder/autosave-<pid>.lua
+    QString m_autosaveMetaPath;   // companion .meta file
+    void cleanupAutosave();
 };

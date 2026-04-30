@@ -89,6 +89,10 @@ set(CODEGEN_SOURCES
     src/codegen/Linter.cpp
     src/codegen/ApiDoc.h
     src/codegen/ApiDoc.cpp
+    src/codegen/Explainer.h
+    src/codegen/Explainer.cpp
+    src/codegen/LineDiff.h
+    src/codegen/LineDiff.cpp
 )
 
 set(SIM_SOURCES
@@ -124,6 +128,8 @@ set(UI_SOURCES
     src/ui/TimelineWidget.cpp
     src/ui/SimulatorPanel.h
     src/ui/SimulatorPanel.cpp
+    src/ui/WizardDialog.h
+    src/ui/WizardDialog.cpp
 )
 
 set(APP_SOURCES
@@ -160,9 +166,10 @@ if(ZC95_BUILD_TESTS AND Qt6Test_FOUND)
         tests/test_roundtrip.cpp
         ${MODEL_SOURCES}
         ${CODEGEN_SOURCES}
+        ${SIM_SOURCES}
         resources/presets.qrc
     )
     target_include_directories(test_roundtrip PRIVATE src)
-    target_link_libraries(test_roundtrip PRIVATE Qt6::Widgets Qt6::Test)
+    target_link_libraries(test_roundtrip PRIVATE Qt6::Widgets Qt6::Test lua_static)
     add_test(NAME test_roundtrip COMMAND test_roundtrip)
 endif()

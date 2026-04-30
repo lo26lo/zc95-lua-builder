@@ -13,6 +13,9 @@ public:
     void load(const EnabledFunctions& f);
     void save(EnabledFunctions& f) const;
 
+    // Hide advanced callbacks (BT HID, AudioIntensity, ExternalTrigger).
+    void setBeginnerMode(bool beginner);
+
 signals:
     void changed();
 

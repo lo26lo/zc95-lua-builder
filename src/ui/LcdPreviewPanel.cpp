@@ -2,6 +2,7 @@
 
 #include <QPainter>
 #include <QFont>
+#include <QSet>
 
 LcdPreviewPanel::LcdPreviewPanel(QWidget* parent) : QWidget(parent) {
     setMinimumSize(280, 220);
@@ -12,6 +13,25 @@ void LcdPreviewPanel::setItems(const QVector<MenuItem>& items, const QString& pa
     m_items = items;
     m_patternName = patternName;
     m_softButton = softButtonLabel;
+    // Drop overrides for menu_ids that no longer exist (item was deleted).
+    QSet<int> validIds;
+    for (const auto& mi : items) validIds.insert(mi.id);
+    QList<int> toRemove;
+    for (auto it = m_liveValues.begin(); it != m_liveValues.end(); ++it) {
+        if (!validIds.contains(it.key())) toRemove.append(it.key());
+    }
+    for (int id : toRemove) m_liveValues.remove(id);
+    update();
+}
+
+void LcdPreviewPanel::setLiveValue(int menuId, int value) {
+    m_liveValues[menuId] = value;
+    update();
+}
+
+void LcdPreviewPanel::clearLiveValues() {
+    if (m_liveValues.isEmpty()) return;
+    m_liveValues.clear();
     update();
 }
 
@@ -80,7 +100,9 @@ void LcdPreviewPanel::paintEvent(QPaintEvent*) {
         p.drawText(QRect(rowRect.left(), rowRect.top(), w, 12), Qt::AlignLeft, title);
 
         if (mi.type == MenuItemType::MinMax) {
-            // Bar graph: fill ratio = (default - min) / (max - min)
+            // Use the live override if present, otherwise the form default.
+            int displayed = m_liveValues.value(mi.id, mi.defaultValue);
+            // Bar graph: fill ratio = (displayed - min) / (max - min)
             int barX = rowRect.left();
             int barY = rowRect.top() + 12;
             int barW = w - 60;
@@ -88,14 +110,25 @@ void LcdPreviewPanel::paintEvent(QPaintEvent*) {
             p.setPen(dim);
             p.drawRect(barX, barY, barW, barH);
             int range = qMax(1, mi.max - mi.min);
-            double ratio = double(mi.defaultValue - mi.min) / range;
+            double ratio = double(displayed - mi.min) / range;
             ratio = qBound(0.0, ratio, 1.0);
             p.fillRect(QRect(barX + 1, barY + 1, int((barW - 2) * ratio), barH - 2), fg);
             p.setPen(fg);
-            QString val = QString::number(mi.defaultValue) + mi.uom;
+            QString val = QString::number(displayed) + mi.uom;
             p.drawText(QRect(barX + barW + 4, barY - 1, 56, 10), Qt::AlignLeft, val);
         } else if (mi.type == MenuItemType::MultiChoice) {
-            QString label = mi.choices.isEmpty() ? "(no choices)" : mi.choices.first().description;
+            // Live override = currently-selected choice_id.
+            QString label;
+            if (mi.choices.isEmpty()) {
+                label = "(no choices)";
+            } else {
+                int liveId = m_liveValues.value(mi.id, mi.choices.first().choiceId);
+                bool found = false;
+                for (const auto& c : mi.choices) {
+                    if (c.choiceId == liveId) { label = c.description; found = true; break; }
+                }
+                if (!found) label = mi.choices.first().description;
+            }
             p.drawText(QRect(rowRect.left() + 12, rowRect.top() + 12, w - 12, 10),
                        Qt::AlignLeft, "< " + label + " >");
         } else if (mi.type == MenuItemType::AudioViewIntensityStereo

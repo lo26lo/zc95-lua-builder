@@ -16,6 +16,10 @@ public:
 
 signals:
     void changed();
+    // Emitted when the user clicks the ▶ Test button on a menu item.
+    // MainWindow handles it by switching to the Simulator tab and
+    // poking the corresponding callback to verify the script reacts.
+    void testItemRequested(int row);
 
 private slots:
     void addItem();
@@ -24,6 +28,7 @@ private slots:
     void duplicateItem();
     void moveUp();
     void moveDown();
+    void testItem();
 
 private:
     void refresh();

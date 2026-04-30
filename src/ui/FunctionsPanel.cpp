@@ -18,18 +18,58 @@ FunctionsPanel::FunctionsPanel(QWidget* parent) : QWidget(parent) {
     auto* layout = new QVBoxLayout(group);
     layout->addWidget(new QLabel("Tick the callbacks your script needs. Stubs will be generated.", this));
 
-    m_setup = makeBox("Setup() — runs once before Loop", "If absent, all channels default to full power", this);
-    m_loop = makeBox("Loop(time_ms) — runs continuously [required]", "Mandatory. time_ms is ms since power-on (float).", this);
+    m_setup = makeBox("Setup() — runs once before Loop",
+        "Tick this to set initial channel state (power, frequency,\n"
+        "pulse width) BEFORE the pattern starts running.\n\n"
+        "If you don't tick it, every channel defaults to:\n"
+        "  power=1000, frequency=150 Hz, pulse_width=150 µs.\n"
+        "That's quite aggressive — Setup is the place to tone it down.", this);
+    m_loop = makeBox("Loop(time_ms) — runs continuously [required]",
+        "MANDATORY. The heart of every pattern.\n"
+        "Called repeatedly with time_ms = milliseconds since power-on.\n"
+        "Use the time argument to schedule events (\"every 500 ms do X\")\n"
+        "rather than relying on counting ticks.", this);
     m_loop->setChecked(true);
     m_loop->setEnabled(false);
 
-    m_minMax = makeBox("MinMaxChange(menu_id, val)", "Called when a MIN_MAX menu item changes", this);
-    m_multiChoice = makeBox("MultiChoiceChange(menu_id, choice_id)", "Called when a MULTI_CHOICE menu item changes", this);
-    m_softButton = makeBox("SoftButton(pushed)", "Top-left soft button. Set Config.soft_button label too.", this);
-    m_externalTrigger = makeBox("ExternalTrigger(socket, part, active)", "Trigger inputs (TRIGGER1/2, parts A/B)", this);
-    m_btKeypress = makeBox("BluetoothRemoteKeypress(key)", "Requires bluetooth_remote_passthrough = true", this);
-    m_btHid = makeBox("BluetoothHidEvent(usage_page, usage, value)", "Raw HID events from custom BT devices", this);
-    m_audioIntensity = makeBox("AudioIntensityChange(L, R, virt)", "Requires audio_processing_mode = AUDIO_INTENSITY", this);
+    m_minMax = makeBox("MinMaxChange(menu_id, val)",
+        "Called when the user moves a MIN_MAX slider on the device LCD.\n"
+        "Tick this if you have any MIN_MAX menu items — otherwise the\n"
+        "user can't influence your pattern at runtime.\n\n"
+        "If you tick it, the smart-merge will pre-fill the function with\n"
+        "an if/elseif chain mapping each menu_id to its variable.", this);
+    m_multiChoice = makeBox("MultiChoiceChange(menu_id, choice_id)",
+        "Called when the user changes a MULTI_CHOICE option on the LCD.\n"
+        "Same idea as MinMaxChange — tick it whenever you have at least\n"
+        "one MULTI_CHOICE menu item.", this);
+    m_softButton = makeBox("SoftButton(pushed)",
+        "Soft button is THE simplest kill-switch. Highly recommended.\n"
+        "When ticked, set the label in Config → \"Soft button label\"\n"
+        "(otherwise the button is invisible).\n\n"
+        "Typical body:\n"
+        "  if pushed then\n"
+        "    -- emergency: turn everything off\n"
+        "    for c=1,4 do zc.ChannelOff(c) end\n"
+        "  end", this);
+    m_externalTrigger = makeBox("ExternalTrigger(socket, part, active)",
+        "External 3.5mm trigger inputs (TRIGGER1, TRIGGER2; parts A/B).\n"
+        "Tick this if you've wired a footswitch / pushbutton / sensor\n"
+        "to the device. Receives an event each time the line is shorted.", this);
+    m_btKeypress = makeBox("BluetoothRemoteKeypress(key)",
+        "Receive button presses from a paired Bluetooth remote\n"
+        "(e.g. a camera shutter remote).\n\n"
+        "ALSO requires Config → \"Bluetooth remote passthrough\" ticked,\n"
+        "otherwise this callback never fires.", this);
+    m_btHid = makeBox("BluetoothHidEvent(usage_page, usage, value)",
+        "Raw HID events from a paired BT device — advanced.\n"
+        "If you don't already know what HID usage pages are, leave this\n"
+        "unchecked.", this);
+    m_audioIntensity = makeBox("AudioIntensityChange(L, R, virt)",
+        "Receives audio level (0-255 per channel) from the audio jack.\n\n"
+        "ALSO requires Config → Audio mode = AUDIO_INTENSITY, otherwise\n"
+        "the callback is never called.\n\n"
+        "Typical body: scale L/R into power values to make the pattern\n"
+        "react to music volume.", this);
 
     layout->addWidget(m_setup);
     layout->addWidget(m_loop);
@@ -72,4 +112,17 @@ void FunctionsPanel::save(EnabledFunctions& f) const {
     f.bluetoothRemoteKeypress = m_btKeypress->isChecked();
     f.bluetoothHidEvent = m_btHid->isChecked();
     f.audioIntensityChange = m_audioIntensity->isChecked();
+}
+
+void FunctionsPanel::setBeginnerMode(bool beginner) {
+    // Hide the advanced callbacks. Force-uncheck them so the generator
+    // doesn't emit stubs for callbacks the beginner can't see.
+    auto hide = [&](QCheckBox* cb) {
+        cb->setVisible(!beginner);
+        if (beginner && cb->isChecked()) cb->setChecked(false);
+    };
+    hide(m_externalTrigger);
+    hide(m_btKeypress);
+    hide(m_btHid);
+    hide(m_audioIntensity);
 }

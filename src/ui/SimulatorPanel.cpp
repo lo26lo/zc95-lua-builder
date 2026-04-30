@@ -12,6 +12,9 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGroupBox>
+#include <QSlider>
+#include <QComboBox>
+#include <QToolButton>
 
 SimulatorPanel::SimulatorPanel(QWidget* parent) : QWidget(parent) {
     m_runtime = new LuaRuntime(this);
@@ -30,10 +33,18 @@ SimulatorPanel::SimulatorPanel(QWidget* parent) : QWidget(parent) {
     m_speedFactor->setRange(0.1, 100.0);
     m_speedFactor->setValue(1.0);
     m_speedFactor->setPrefix("speed ×");
+    m_speedFactor->setToolTip(
+        "Multiplier on simulated time. 1.0 = real-time, 5.0 = 5× faster.\n"
+        "This is the ONLY control that changes the playback speed of the\n"
+        "timeline — Menu controls sliders below change the script's\n"
+        "parameters, not the simulator speed.");
     m_stepMs = new QSpinBox(this);
     m_stepMs->setRange(1, 1000);
     m_stepMs->setValue(20);
     m_stepMs->setSuffix(" ms/tick");
+    m_stepMs->setToolTip(
+        "Simulated milliseconds advanced per tick. Smaller = finer\n"
+        "resolution, slower wallclock progress. 20 ms is a good default.");
     m_clock = new QLabel("t = 0.000s", this);
     m_clock->setStyleSheet("font-family: monospace;");
 
@@ -61,6 +72,22 @@ SimulatorPanel::SimulatorPanel(QWidget* parent) : QWidget(parent) {
         statesLayout->addWidget(m_channelStates[i], 1, i);
     }
     outer->addWidget(states);
+
+    // Menu controls — sliders for MIN_MAX, combos for MULTI_CHOICE.
+    // Populated lazily by setMenuItems(); hidden when no items.
+    m_menuGroup = new QGroupBox("Menu controls (live) — change SCRIPT parameters, not simulator speed", this);
+    m_menuGroup->setToolTip(
+        "Move a slider / pick a choice and the simulator fires the matching\n"
+        "MinMaxChange / MultiChoiceChange callback in real time. Lets you\n"
+        "test how your script reacts to the user turning the device knob —\n"
+        "without recompiling or reflashing.\n\n"
+        "These sliders DO NOT change the simulator's playback speed.\n"
+        "For that, use \"speed ×N\" and \"N ms/tick\" at the top.");
+    m_menuLayout = new QVBoxLayout(m_menuGroup);
+    m_menuLayout->setContentsMargins(8, 8, 8, 8);
+    m_menuLayout->setSpacing(4);
+    m_menuGroup->hide();
+    outer->addWidget(m_menuGroup);
 
     // Timeline
     m_timeline = new TimelineWidget(this);
@@ -239,4 +266,200 @@ void SimulatorPanel::refreshState() {
             "font-family: monospace; padding: 4px 8px; background:%1; color:%2; border-radius:3px;")
             .arg(ch.on ? "#3a5" : "#333", ch.on ? "#fff" : "#bbb"));
     }
+}
+
+bool SimulatorPanel::resolveScriptConfig(ScriptConfig& out, QString* warning) const {
+    if (!m_loaded || !m_runtime) {
+        if (warning) *warning = "No script loaded.";
+        return false;
+    }
+    return m_runtime->extractScriptConfig(out, warning);
+}
+
+bool SimulatorPanel::testMenuItemDrive(const MenuItem& item) {
+    if (!m_loaded) {
+        appendLogs("[INFO] Test: no script loaded.");
+        return false;
+    }
+    // Make sure Setup() has run.
+    if (!m_setupCalled) {
+        QString err;
+        m_runtime->callSetup(&err);
+        m_setupCalled = true;
+        appendLogs(m_runtime->takeOutput());
+        m_allEvents += m_runtime->takeEvents();
+    }
+
+    auto snapshot = [&]() {
+        const auto& s = m_runtime->state();
+        QString out;
+        for (int i = 0; i < 4; ++i) {
+            out += QString("CH%1:%2/%3/%4/%5;")
+                       .arg(i + 1)
+                       .arg(s.channels[i].on ? '1' : '0')
+                       .arg(s.channels[i].power)
+                       .arg(s.channels[i].frequencyHz)
+                       .arg(s.channels[i].pulseWidthPosUs);
+        }
+        return out;
+    };
+    QString before = snapshot();
+
+    auto runFew = [&](int ticks) {
+        QString err;
+        for (int i = 0; i < ticks; ++i) {
+            m_runtime->callLoop(m_runtime->currentTimeMs() + 20.0, &err);
+            m_runtime->updatePulses();
+        }
+        appendLogs(m_runtime->takeOutput());
+        m_allEvents += m_runtime->takeEvents();
+        refreshState();
+    };
+
+    appendLogs(QString("[TEST] Driving menu_id %1 (\"%2\")…").arg(item.id).arg(item.title));
+
+    QString err;
+    if (item.type == MenuItemType::MinMax) {
+        QVector<int> values = { item.min, item.defaultValue, item.max };
+        for (int v : values) {
+            m_runtime->callMinMaxChange(item.id, v, &err);
+            runFew(5);
+        }
+    } else if (item.type == MenuItemType::MultiChoice) {
+        for (const auto& c : item.choices) {
+            m_runtime->callMultiChoiceChange(item.id, c.choiceId, &err);
+            runFew(5);
+        }
+    } else {
+        appendLogs("[TEST] No interactive control for this item type.");
+        return false;
+    }
+
+    QString after = snapshot();
+    bool reacted = (before != after) || !m_allEvents.isEmpty();
+    appendLogs(reacted
+        ? "[TEST] Pattern reacted to the value changes — looks wired."
+        : "[TEST] Pattern did NOT react. Check that MinMaxChange/MultiChoiceChange "
+          "is defined AND that it handles this menu_id.");
+    return reacted;
+}
+
+void SimulatorPanel::setMenuItems(const QVector<MenuItem>& items) {
+    // Skip rebuild if nothing actually changed (avoid resetting sliders the
+    // user is mid-drag).
+    if (items.size() == m_currentMenuItems.size()) {
+        bool same = true;
+        for (int i = 0; i < items.size(); ++i) {
+            const auto& a = items[i];
+            const auto& b = m_currentMenuItems[i];
+            if (a.id != b.id || a.type != b.type || a.title != b.title
+                || a.min != b.min || a.max != b.max
+                || a.incrementStep != b.incrementStep
+                || a.defaultValue != b.defaultValue
+                || a.choices.size() != b.choices.size()) {
+                same = false; break;
+            }
+        }
+        if (same) return;
+    }
+    m_currentMenuItems = items;
+
+    // Wipe existing widgets in the layout.
+    while (QLayoutItem* it = m_menuLayout->takeAt(0)) {
+        if (QWidget* w = it->widget()) w->deleteLater();
+        delete it;
+    }
+
+    int liveCount = 0;
+    for (const auto& mi : items) {
+        if (mi.type == MenuItemType::MinMax) {
+            // [Title (uom)]   |———O———|   [value]
+            auto* row = new QWidget(m_menuGroup);
+            auto* h = new QHBoxLayout(row);
+            h->setContentsMargins(0, 0, 0, 0);
+
+            QString labelText = mi.title;
+            if (!mi.uom.isEmpty()) labelText += " (" + mi.uom + ")";
+            auto* label = new QLabel(labelText, row);
+            label->setMinimumWidth(140);
+            label->setToolTip(QString(
+                "menu_id %1 — fires MinMaxChange(%1, value) on every change.\n"
+                "Range: %2..%3, step %4. Default: %5.")
+                .arg(mi.id).arg(mi.min).arg(mi.max).arg(mi.incrementStep).arg(mi.defaultValue));
+
+            auto* slider = new QSlider(Qt::Horizontal, row);
+            slider->setRange(mi.min, mi.max);
+            slider->setSingleStep(mi.incrementStep);
+            slider->setPageStep(mi.incrementStep * 10);
+            slider->setValue(mi.defaultValue);
+
+            auto* valLabel = new QLabel(QString::number(mi.defaultValue), row);
+            valLabel->setMinimumWidth(48);
+            valLabel->setStyleSheet("font-family: monospace;");
+            valLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+            h->addWidget(label);
+            h->addWidget(slider, 1);
+            h->addWidget(valLabel);
+            m_menuLayout->addWidget(row);
+
+            int menuId = mi.id;
+            connect(slider, &QSlider::valueChanged, this, [this, menuId, valLabel](int v) {
+                valLabel->setText(QString::number(v));
+                emit liveMenuValueChanged(menuId, v);   // mirror on LCD preview
+                if (!m_loaded) return;
+                QString err;
+                if (!m_runtime->callMinMaxChange(menuId, v, &err)) {
+                    appendLogs(QString("[ERROR] MinMaxChange(%1,%2): %3").arg(menuId).arg(v).arg(err));
+                }
+                appendLogs(m_runtime->takeOutput());
+                m_allEvents += m_runtime->takeEvents();
+                refreshState();
+            });
+            // Initial fire so the LCD preview matches the slider's
+            // starting position even before the user touches it.
+            emit liveMenuValueChanged(menuId, slider->value());
+            ++liveCount;
+        } else if (mi.type == MenuItemType::MultiChoice) {
+            auto* row = new QWidget(m_menuGroup);
+            auto* h = new QHBoxLayout(row);
+            h->setContentsMargins(0, 0, 0, 0);
+
+            auto* label = new QLabel(mi.title, row);
+            label->setMinimumWidth(140);
+            label->setToolTip(QString(
+                "menu_id %1 — fires MultiChoiceChange(%1, choice_id) on every change.")
+                .arg(mi.id));
+
+            auto* combo = new QComboBox(row);
+            for (const auto& c : mi.choices) {
+                combo->addItem(c.description, c.choiceId);
+            }
+            h->addWidget(label);
+            h->addWidget(combo, 1);
+            m_menuLayout->addWidget(row);
+
+            int menuId = mi.id;
+            connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this,
+                [this, combo, menuId](int) {
+                    int cid = combo->currentData().toInt();
+                    emit liveMenuValueChanged(menuId, cid);
+                    if (!m_loaded) return;
+                    QString err;
+                    if (!m_runtime->callMultiChoiceChange(menuId, cid, &err)) {
+                        appendLogs(QString("[ERROR] MultiChoiceChange(%1,%2): %3").arg(menuId).arg(cid).arg(err));
+                    }
+                    appendLogs(m_runtime->takeOutput());
+                    m_allEvents += m_runtime->takeEvents();
+                    refreshState();
+                });
+            if (combo->count() > 0) {
+                emit liveMenuValueChanged(menuId, combo->currentData().toInt());
+            }
+            ++liveCount;
+        }
+        // AUDIO_VIEW_INTENSITY_* types have no interactive control.
+    }
+
+    m_menuGroup->setVisible(liveCount > 0);
 }

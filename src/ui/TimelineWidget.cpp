@@ -2,9 +2,21 @@
 
 #include <QPainter>
 #include <QPen>
+#include <QPolygon>
 
 TimelineWidget::TimelineWidget(QWidget* parent) : QWidget(parent) {
     setMinimumSize(400, 160);
+    setToolTip(
+        "Each lane shows what the SCRIPT did on that channel.\n"
+        "  ▮ green   = sustained ON (between ChannelOn / ChannelOff)\n"
+        "  ▮ orange  = ChannelPulseMs (single fixed-duration pulse)\n"
+        "  ▼ yellow cursor = simulated time \"now\".\n\n"
+        "The pulse PATTERN you see is decided by the script's logic.\n"
+        "Moving a Menu controls slider changes the script's parameters\n"
+        "(e.g. zc.SetFrequency value) but won't change the visual\n"
+        "density unless the script ties its scheduling to that value.\n\n"
+        "To change the SIMULATOR speed, use the \"speed ×N\" and\n"
+        "\"N ms/tick\" controls above.");
 }
 
 void TimelineWidget::setEvents(const QVector<ChannelEvent>& events, double currentTimeMs) {
@@ -34,9 +46,20 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
     const int chartRight = r.right() - 4;
     const int chartW = chartRight - chartLeft;
 
-    double tEnd = m_currentTimeMs;
-    double tStart = tEnd - m_windowMs;
-    if (tStart < 0) tStart = 0;
+    // Fixed-window-then-slide behaviour:
+    //   • t < windowMs     → window is [0, windowMs], cursor advances
+    //                        from left to right inside it.
+    //   • t ≥ windowMs     → window slides so its right edge is "now".
+    // This gives the user a visible "cursor moving" feedback during the
+    // first few seconds, instead of the cursor pinned to the right edge.
+    double tStart, tEnd;
+    if (m_currentTimeMs < m_windowMs) {
+        tStart = 0;
+        tEnd   = m_windowMs;
+    } else {
+        tEnd   = m_currentTimeMs;
+        tStart = tEnd - m_windowMs;
+    }
     double span = qMax(1.0, tEnd - tStart);
 
     auto xOf = [&](double t) {
@@ -101,10 +124,13 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
     }
     // Close any still-on segment at currentTime
     for (int i = 0; i < 4; ++i) {
-        if (on[i]) segs[i].push_back({onSince[i], tEnd, isPulse[i]});
+        if (on[i]) segs[i].push_back({onSince[i], m_currentTimeMs, isPulse[i]});
     }
 
-    // Draw segments
+    // Draw segments — no per-segment outline. Adjacent segments of the
+    // same kind merge into a single visual bar; only color changes (pulse
+    // = orange, sustained ON = green) draw a visible boundary. This stops
+    // the user mistaking pulse-edge marks for "cursors that don't move".
     for (int i = 0; i < 4; ++i) {
         int yTop = r.top() + 4 + i * laneH;
         int barY = yTop + laneH / 2 - 8;
@@ -116,12 +142,55 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
             int w = qMax(2, x2 - x1);
             QColor col = s.isPulse ? QColor("#f0a020") : QColor("#4ec96e");
             p.fillRect(QRect(x1, barY, w, barH), col);
-            p.setPen(col.darker(150));
-            p.drawRect(QRect(x1, barY, w, barH));
         }
     }
 
-    // Vertical "now" line
-    p.setPen(QPen(QColor("#aa6666"), 1, Qt::DashLine));
-    p.drawLine(xOf(tEnd), r.top() + 2, xOf(tEnd), axisY);
+    // Vertical "now" cursor — designed to stay visible on top of dense
+    // green segments. Four layers, all in cyan/yellow that contrasts
+    // strongly against the green/orange channel bars:
+    //   1. A 12px translucent yellow halo for the "glow".
+    //   2. A 3px solid bright-yellow line as the actual marker.
+    //   3. A 1px white core down the middle for max contrast.
+    //   4. A big yellow triangle at the top (and a matching one at the
+    //      bottom on the time axis) so the eye finds it instantly.
+    // The cursor follows simulated "now", not the window's right edge.
+    // While t < windowMs the window is fixed and the cursor walks from
+    // left to right; afterwards the cursor sits at the right edge while
+    // the window slides under it.
+    int nowX = xOf(m_currentTimeMs);
+    int top = r.top() + 2;
+    int bot = axisY;
+
+    // Halo (wide, very translucent)
+    p.setPen(QPen(QColor(255, 220, 0, 50), 12));
+    p.drawLine(nowX, top, nowX, bot);
+
+    // Main line — solid, bright yellow.
+    p.setPen(QPen(QColor("#ffd400"), 3));
+    p.drawLine(nowX, top, nowX, bot);
+
+    // White inner core for contrast on saturated channels.
+    p.setPen(QPen(QColor(255, 255, 255, 220), 1));
+    p.drawLine(nowX, top, nowX, bot);
+
+    // Top arrow head — bigger this time.
+    {
+        QPolygon tri;
+        tri << QPoint(nowX - 7, top - 2)
+            << QPoint(nowX + 7, top - 2)
+            << QPoint(nowX,     top + 9);
+        p.setPen(QPen(QColor(0, 0, 0, 200), 1));
+        p.setBrush(QColor("#ffd400"));
+        p.drawPolygon(tri);
+    }
+    // Bottom arrow head pointing up — sits on the time axis.
+    {
+        QPolygon tri;
+        tri << QPoint(nowX - 7, bot + 2)
+            << QPoint(nowX + 7, bot + 2)
+            << QPoint(nowX,     bot - 7);
+        p.setPen(QPen(QColor(0, 0, 0, 200), 1));
+        p.setBrush(QColor("#ffd400"));
+        p.drawPolygon(tri);
+    }
 }

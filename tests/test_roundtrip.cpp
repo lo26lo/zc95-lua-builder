@@ -2,8 +2,10 @@
 #include "codegen/LuaGenerator.h"
 #include "codegen/LuaParser.h"
 #include "codegen/Linter.h"
+#include "sim/LuaRuntime.h"
 
 #include <QtTest/QtTest>
+#include <QFile>
 
 class TestRoundtrip : public QObject {
     Q_OBJECT
@@ -28,7 +30,34 @@ private slots:
     void mergeAppendsNewFunctionStubs();
     void mergeFallsBackWhenNoConfigBlock();
     void mergeOnOfficialScriptKeepsLogic();
+
+    // Simulator end-to-end smoke tests.
+    void officialScriptsLoadInSimulator_data();
+    void officialScriptsLoadInSimulator();
+    void officialScriptsSetupRuns_data();
+    void officialScriptsSetupRuns();
+    void officialScriptsLoopRuns_data();
+    void officialScriptsLoopRuns();
+    void officialScriptsResolveConfig_data();
+    void officialScriptsResolveConfig();
+    void officialScriptsExerciseCallbacks_data();
+    void officialScriptsExerciseCallbacks();
 };
+
+// Helper used by the simulator smoke tests.
+static QString loadResourceText(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return QString();
+    return QString::fromUtf8(f.readAll());
+}
+
+static const QStringList& officialScriptList() {
+    static const QStringList names = {
+        "climb", "combo", "intense", "orgasm", "phasing2", "random2",
+        "rhythm", "stroke", "tens", "torment", "trifade", "waves"
+    };
+    return names;
+}
 
 static void assertSameConfig(const ScriptConfig& a, const ScriptConfig& b) {
     QCOMPARE(a.name, b.name);
@@ -422,6 +451,165 @@ void TestRoundtrip::mergeOnOfficialScriptKeepsLogic() {
     auto r2 = LuaParser::parse(merged);
     QVERIFY(r2.ok);
     assertSameConfig(r.config, r2.config);
+}
+
+// =====================================================================
+// Simulator end-to-end smoke tests
+//
+// These run each of the 12 official scripts through the embedded
+// LuaRuntime and check it doesn't blow up. Each script is exercised in
+// isolation so a regression in one never masks failures in another.
+// =====================================================================
+
+void TestRoundtrip::officialScriptsLoadInSimulator_data() {
+    QTest::addColumn<QString>("name");
+    for (const QString& n : officialScriptList()) QTest::newRow(n.toUtf8()) << n;
+}
+
+void TestRoundtrip::officialScriptsLoadInSimulator() {
+    QFETCH(QString, name);
+    QString src = loadResourceText(":/presets/" + name + ".lua");
+    QVERIFY2(!src.isEmpty(), qPrintable("missing resource: " + name));
+
+    LuaRuntime rt;
+    QString err;
+    QVERIFY2(rt.loadScript(src, &err),
+             qPrintable(QString("script %1 failed to load: %2").arg(name, err)));
+}
+
+void TestRoundtrip::officialScriptsSetupRuns_data() {
+    QTest::addColumn<QString>("name");
+    for (const QString& n : officialScriptList()) QTest::newRow(n.toUtf8()) << n;
+}
+
+void TestRoundtrip::officialScriptsSetupRuns() {
+    QFETCH(QString, name);
+    QString src = loadResourceText(":/presets/" + name + ".lua");
+    LuaRuntime rt;
+    QVERIFY(rt.loadScript(src));
+    QString err;
+    QVERIFY2(rt.callSetup(&err),
+             qPrintable(QString("Setup() of %1 failed: %2").arg(name, err)));
+}
+
+void TestRoundtrip::officialScriptsLoopRuns_data() {
+    QTest::addColumn<QString>("name");
+    for (const QString& n : officialScriptList()) QTest::newRow(n.toUtf8()) << n;
+}
+
+void TestRoundtrip::officialScriptsLoopRuns() {
+    QFETCH(QString, name);
+    QString src = loadResourceText(":/presets/" + name + ".lua");
+    LuaRuntime rt;
+    QVERIFY(rt.loadScript(src));
+    QString err;
+    QVERIFY(rt.callSetup(&err));
+
+    // Run 100 ticks of Loop at 20ms intervals = 2 seconds simulated.
+    const int kTicks = 100;
+    const double kStepMs = 20.0;
+    for (int i = 1; i <= kTicks; ++i) {
+        bool ok = rt.callLoop(i * kStepMs, &err);
+        if (!ok) {
+            QFAIL(qPrintable(QString("Loop() of %1 crashed at tick %2: %3")
+                                 .arg(name).arg(i).arg(err)));
+        }
+        rt.updatePulses();
+    }
+}
+
+void TestRoundtrip::officialScriptsResolveConfig_data() {
+    QTest::addColumn<QString>("name");
+    for (const QString& n : officialScriptList()) QTest::newRow(n.toUtf8()) << n;
+}
+
+void TestRoundtrip::officialScriptsResolveConfig() {
+    QFETCH(QString, name);
+    QString src = loadResourceText(":/presets/" + name + ".lua");
+    LuaRuntime rt;
+    QVERIFY(rt.loadScript(src));
+
+    ScriptConfig resolved;
+    QString warn;
+    QVERIFY2(rt.extractScriptConfig(resolved, &warn),
+             qPrintable(QString("could not extract Config from %1: %2").arg(name, warn)));
+
+    // Every official script defines a non-empty name and at least one menu item.
+    QVERIFY(!resolved.name.isEmpty());
+    QVERIFY(!resolved.menuItems.isEmpty());
+
+    // Every menu item should have a unique non-zero ID once resolved
+    // through Lua (regression test for the regex parser bug that left
+    // every id at 0 because they were expressed as MenuId.X).
+    QSet<int> ids;
+    for (const auto& mi : resolved.menuItems) {
+        QVERIFY2(mi.id > 0,
+                 qPrintable(QString("%1: menu_item \"%2\" has id 0").arg(name, mi.title)));
+        QVERIFY2(!ids.contains(mi.id),
+                 qPrintable(QString("%1: duplicate menu_item id %2").arg(name).arg(mi.id)));
+        ids.insert(mi.id);
+    }
+}
+
+void TestRoundtrip::officialScriptsExerciseCallbacks_data() {
+    QTest::addColumn<QString>("name");
+    for (const QString& n : officialScriptList()) QTest::newRow(n.toUtf8()) << n;
+}
+
+void TestRoundtrip::officialScriptsExerciseCallbacks() {
+    QFETCH(QString, name);
+    QString src = loadResourceText(":/presets/" + name + ".lua");
+    LuaRuntime rt;
+    QVERIFY(rt.loadScript(src));
+    QVERIFY(rt.callSetup());
+
+    ScriptConfig cfg;
+    QVERIFY(rt.extractScriptConfig(cfg));
+
+    QString err;
+    // For every MIN_MAX item, drive min / default / max.
+    // For every MULTI_CHOICE item, drive every choice_id.
+    // After each, run a few Loop ticks and ensure the script still works.
+    double t = 0;
+    auto runTicks = [&](int n) {
+        for (int i = 0; i < n; ++i) {
+            t += 20.0;
+            bool ok = rt.callLoop(t, &err);
+            if (!ok) {
+                QFAIL(qPrintable(QString("%1: Loop crashed during exercise: %2")
+                                     .arg(name, err)));
+            }
+            rt.updatePulses();
+        }
+    };
+
+    for (const auto& mi : cfg.menuItems) {
+        if (mi.type == MenuItemType::MinMax) {
+            for (int v : { mi.min, mi.defaultValue, mi.max }) {
+                bool ok = rt.callMinMaxChange(mi.id, v, &err);
+                if (!ok) {
+                    QFAIL(qPrintable(QString("%1: MinMaxChange(%2,%3) crashed: %4")
+                                         .arg(name).arg(mi.id).arg(v).arg(err)));
+                }
+                runTicks(3);
+            }
+        } else if (mi.type == MenuItemType::MultiChoice) {
+            for (const auto& c : mi.choices) {
+                bool ok = rt.callMultiChoiceChange(mi.id, c.choiceId, &err);
+                if (!ok) {
+                    QFAIL(qPrintable(QString("%1: MultiChoiceChange(%2,%3) crashed: %4")
+                                         .arg(name).arg(mi.id).arg(c.choiceId).arg(err)));
+                }
+                runTicks(3);
+            }
+        }
+    }
+
+    // Soft button + external trigger if defined.
+    rt.callSoftButton(true, &err);   runTicks(1);
+    rt.callSoftButton(false, &err);  runTicks(1);
+    rt.callExternalTrigger("TRIGGER1", "A", true, &err);  runTicks(1);
+    rt.callExternalTrigger("TRIGGER1", "A", false, &err); runTicks(1);
 }
 
 QTEST_MAIN(TestRoundtrip)

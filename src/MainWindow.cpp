@@ -10,9 +10,13 @@
 #include "ui/ApiDocPanel.h"
 #include "ui/LcdPreviewPanel.h"
 #include "ui/SimulatorPanel.h"
+#include "ui/WizardDialog.h"
 #include "codegen/LuaGenerator.h"
 #include "codegen/LuaParser.h"
 #include "codegen/Linter.h"
+#include "codegen/Explainer.h"
+#include "codegen/LineDiff.h"
+#include "sim/LuaRuntime.h"
 
 #include <QSplitter>
 #include <QTabWidget>
@@ -35,9 +39,20 @@
 #include <QLabel>
 #include <QVBoxLayout>
 #include <QTextCursor>
+#include <QStandardPaths>
+#include <QDir>
+#include <QTimer>
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QRegularExpression>
+#include <QDialog>
+#include <QTextBrowser>
+#include <QPushButton>
+#include <QHBoxLayout>
+#include <QCheckBox>
 
 MainWindow::MainWindow() {
-    setWindowTitle("ZC95 Lua Builder");
+    setWindowTitle("ZC95 Lua Builder  ⚠ EXPERIMENTAL — UNTESTED ON HARDWARE");
     resize(1500, 900);
     setAcceptDrops(true);
 
@@ -46,9 +61,31 @@ MainWindow::MainWindow() {
     connectSignals();
     loadSettings();
 
+    // Set up the autosave file paths (one per process — keeps several
+    // simultaneous instances from clobbering each other's drafts).
+    {
+        QString dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation)
+                      + "/zc95-lua-builder";
+        QDir().mkpath(dir);
+        qint64 pid = QCoreApplication::applicationPid();
+        m_autosavePath     = QString("%1/autosave-%2.lua").arg(dir).arg(pid);
+        m_autosaveMetaPath = QString("%1/autosave-%2.meta").arg(dir).arg(pid);
+    }
+
+    // Look for any leftover autosave from a previous (crashed?) run before
+    // we overwrite our own slot.
+    offerAutosaveRecovery();
+
     if (m_currentFile.isEmpty()) {
         newScript();
     }
+
+    // Kick off the autosave timer (30 s).
+    m_autosaveTimer = new QTimer(this);
+    m_autosaveTimer->setInterval(30 * 1000);
+    connect(m_autosaveTimer, &QTimer::timeout, this, &MainWindow::writeAutosave);
+    m_autosaveTimer->start();
+
     statusBar()->showMessage("Ready");
 }
 
@@ -104,6 +141,15 @@ void MainWindow::buildUi() {
     addDockWidget(Qt::BottomDockWidgetArea, m_issuesDock);
 
     // ----- Status bar widgets -----
+    m_beginnerBadge = new QLabel("", this);
+    m_beginnerBadge->setStyleSheet(
+        "padding: 2px 8px; border-radius: 3px; background:#3b4d68; color:#a8c5e8;");
+    m_beginnerBadge->setText("● beginner mode");
+    m_beginnerBadge->setToolTip(
+        "Beginner mode is on. Toggle in View → Beginner mode.");
+    m_beginnerBadge->hide();   // shown only when beginner mode is on
+    statusBar()->addPermanentWidget(m_beginnerBadge);
+
     m_syncBadge = new QLabel("", this);
     m_syncBadge->setStyleSheet("padding: 2px 8px; border-radius: 3px;");
     statusBar()->addPermanentWidget(m_syncBadge);
@@ -112,6 +158,9 @@ void MainWindow::buildUi() {
 void MainWindow::buildMenus() {
     auto* fileMenu = menuBar()->addMenu("&File");
     auto* newAct = fileMenu->addAction("&New", this, &MainWindow::newScript, QKeySequence::New);
+    auto* wizardAct = fileMenu->addAction("New from &wizard…", this,
+        &MainWindow::newFromWizard, QKeySequence("Ctrl+Shift+N"));
+    wizardAct->setStatusTip("Walk through 5 questions and generate a starting pattern.");
     auto* openAct = fileMenu->addAction("&Open…", this, &MainWindow::openScript, QKeySequence::Open);
     auto* saveAct = fileMenu->addAction("&Save", this, [this]() { saveScript(); }, QKeySequence::Save);
     auto* saveAsAct = fileMenu->addAction("Save &As…", this, [this]() { saveScriptAs(); }, QKeySequence::SaveAs);
@@ -137,17 +186,24 @@ void MainWindow::buildMenus() {
         &MainWindow::parseEditorIntoForm, QKeySequence("Ctrl+Shift+G"));
     generateMenu->addSeparator();
     generateMenu->addAction("&Lint", this, &MainWindow::runLinter, QKeySequence("Ctrl+L"));
+    auto* preflightAct = generateMenu->addAction("&Pre-flight check", this,
+        &MainWindow::runPreflight, QKeySequence("Ctrl+Shift+P"));
+    preflightAct->setStatusTip(
+        "Run the linter AND a 1-second simulator dry-run to score the script.");
 
     auto* simMenu = menuBar()->addMenu("&Simulator");
     simMenu->addAction("&Load editor into simulator", this,
         &MainWindow::loadCurrentEditorIntoSim, QKeySequence("Ctrl+R"));
 
     auto* presetMenu = menuBar()->addMenu("&Presets");
-    presetMenu->addAction("Toggle", this, [this]() { loadPreset("toggle"); });
-    presetMenu->addAction("Fire", this, [this]() { loadPreset("fire"); });
-    presetMenu->addAction("Waves (skeleton)", this, [this]() { loadPreset("waves"); });
-    presetMenu->addAction("Audio", this, [this]() { loadPreset("audio"); });
-    presetMenu->addSeparator();
+    auto* quickToggle = presetMenu->addAction("Toggle", this, [this]() { loadPreset("toggle"); });
+    auto* quickFire = presetMenu->addAction("Fire", this, [this]() { loadPreset("fire"); });
+    auto* quickWaves = presetMenu->addAction("Waves (skeleton)", this, [this]() { loadPreset("waves"); });
+    auto* quickAudio = presetMenu->addAction("Audio", this, [this]() { loadPreset("audio"); });
+    auto* quickSep = presetMenu->addSeparator();
+    // We hide the quick presets in beginner mode (they're skeletons —
+    // less polished than the official scripts).
+    m_quickPresetActions = { quickToggle, quickFire, quickWaves, quickAudio, quickSep };
     auto* officialMenu = presetMenu->addMenu("Official scripts");
     const QStringList officials = {
         "climb", "combo", "intense", "orgasm", "phasing2", "random2",
@@ -163,8 +219,29 @@ void MainWindow::buildMenus() {
 
     auto* viewMenu = menuBar()->addMenu("&View");
     viewMenu->addAction(m_issuesDock->toggleViewAction());
+    viewMenu->addSeparator();
+    m_beginnerAction = viewMenu->addAction("&Beginner mode");
+    m_beginnerAction->setCheckable(true);
+    m_beginnerAction->setStatusTip(
+        "Hide advanced options (triphase, BT HID, audio, …). Recommended "
+        "if you're new to ZC95 Lua scripting.");
+    connect(m_beginnerAction, &QAction::toggled, this, &MainWindow::setBeginnerMode);
+
+    auto* showDiffAct = viewMenu->addAction("Show &diff after regenerate");
+    showDiffAct->setCheckable(true);
+    {
+        QSettings s("zc95", "lua-builder");
+        showDiffAct->setChecked(s.value("showRegenDiff", true).toBool());
+    }
+    connect(showDiffAct, &QAction::toggled, this, [](bool on) {
+        QSettings s("zc95", "lua-builder");
+        s.setValue("showRegenDiff", on);
+    });
 
     auto* helpMenu = menuBar()->addMenu("&Help");
+    helpMenu->addAction("&Explain this script…", this, &MainWindow::explainScript,
+                        QKeySequence("Ctrl+Shift+E"));
+    helpMenu->addSeparator();
     helpMenu->addAction("&About", this, &MainWindow::about);
 
     auto* tb = addToolBar("Main");
@@ -175,6 +252,8 @@ void MainWindow::buildMenus() {
     tb->addSeparator();
     tb->addAction(regenAct);
     tb->addAction(parseAct);
+    tb->addSeparator();
+    tb->addAction(preflightAct);
 }
 
 void MainWindow::connectSignals() {
@@ -193,14 +272,19 @@ void MainWindow::connectSignals() {
         if (m_suppressDirty) return;
         setDirty(true);
         updateSyncIndicator();
-        // Live-refresh the LCD preview as the user edits the form.
+        // Live-refresh the LCD preview AND the simulator's live controls
+        // as the user edits the form.
         ScriptConfig snap = collectConfig();
         m_lcdPreview->setItems(snap.menuItems, snap.name, snap.softButtonLabel);
+        if (m_simPanel) m_simPanel->setMenuItems(snap.menuItems);
         statusBar()->showMessage("Form changed — press Ctrl+G to regenerate code", 4000);
     };
     connect(m_configPanel, &ConfigPanel::changed, this, formChanged);
     connect(m_menuItemsPanel, &MenuItemsPanel::changed, this, formChanged);
     connect(m_functionsPanel, &FunctionsPanel::changed, this, formChanged);
+
+    connect(m_menuItemsPanel, &MenuItemsPanel::testItemRequested,
+            this, &MainWindow::testMenuItem);
 
     connect(m_issuesPanel, &IssuesPanel::jumpToLine, this, [this](int line) {
         if (line <= 0) return;
@@ -221,6 +305,12 @@ void MainWindow::connectSignals() {
     connect(m_simPanel, &SimulatorPanel::needsScript, this, [this]() {
         m_simPanel->loadSourceSilent(m_editor->toPlainText());
     });
+
+    // Mirror the simulator's live sliders / combos onto the LCD preview.
+    connect(m_simPanel, &SimulatorPanel::liveMenuValueChanged, this,
+            [this](int menuId, int value) {
+                if (m_lcdPreview) m_lcdPreview->setLiveValue(menuId, value);
+            });
 
     // When switching to the Simulator tab, refresh the runtime from the
     // editor if the user has never loaded anything yet. This is cheap and
@@ -245,14 +335,17 @@ void MainWindow::applyConfigToForm(const ScriptConfig& c) {
     m_configPanel->load(c);
     m_menuItemsPanel->load(c.menuItems);
     m_functionsPanel->load(c.functions);
+    if (m_lcdPreview) m_lcdPreview->clearLiveValues();
     m_lcdPreview->setItems(c.menuItems, c.name, c.softButtonLabel);
+    if (m_simPanel) m_simPanel->setMenuItems(c.menuItems);
     m_suppressDirty = false;
 }
 
 void MainWindow::setDirty(bool dirty) {
     m_dirty = dirty;
     QString base = m_currentFile.isEmpty() ? "untitled" : QFileInfo(m_currentFile).fileName();
-    setWindowTitle(QString("ZC95 Lua Builder — %1%2").arg(base, dirty ? " *" : ""));
+    setWindowTitle(QString("ZC95 Lua Builder  ⚠ EXPERIMENTAL — %1%2")
+                       .arg(base, dirty ? " *" : ""));
 }
 
 void MainWindow::setCurrentFile(const QString& path) {
@@ -275,10 +368,173 @@ bool MainWindow::maybeSave() {
 void MainWindow::closeEvent(QCloseEvent* e) {
     if (maybeSave()) {
         saveSettings();
+        cleanupAutosave();   // graceful exit — drop our draft
         e->accept();
     } else {
         e->ignore();
     }
+}
+
+void MainWindow::writeAutosave() {
+    // Only autosave if there's something to save AND it's actually dirty
+    // (no point writing identical bytes every 30 s otherwise).
+    if (!m_dirty) return;
+    if (m_autosavePath.isEmpty()) return;
+    QString src = m_editor ? m_editor->toPlainText() : QString();
+    if (src.trimmed().isEmpty()) return;
+
+    QFile f(m_autosavePath);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) return;
+    QTextStream out(&f);
+    out << src;
+    f.close();
+
+    // Companion .meta — original path + timestamp.
+    QFile meta(m_autosaveMetaPath);
+    if (meta.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QTextStream mout(&meta);
+        mout << "originalPath=" << m_currentFile << "\n";
+        mout << "savedAt=" << QDateTime::currentDateTime().toString(Qt::ISODate) << "\n";
+    }
+}
+
+void MainWindow::offerAutosaveRecovery() {
+    // Scan the autosave dir for leftover files NOT belonging to our PID.
+    QString dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation)
+                  + "/zc95-lua-builder";
+    QDir d(dir);
+    if (!d.exists()) return;
+    qint64 myPid = QCoreApplication::applicationPid();
+    QStringList autosaves = d.entryList(QStringList() << "autosave-*.lua",
+                                        QDir::Files, QDir::Time);
+    for (const QString& fn : autosaves) {
+        // Extract PID from filename
+        QRegularExpression re(R"(autosave-(\d+)\.lua)");
+        auto m = re.match(fn);
+        if (!m.hasMatch()) continue;
+        qint64 pid = m.captured(1).toLongLong();
+        if (pid == myPid) continue;
+        // If a process with that PID is still alive, skip — it's another
+        // running instance, not a crash leftover. (Cheap test: try opening
+        // for write; if locked, another process may hold it. But Windows
+        // rarely locks files by other PIDs. Skip the check; worst case the
+        // user gets a recover dialog they can ignore.)
+        QString path = d.absoluteFilePath(fn);
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+        QTextStream in(&f);
+        QString src = in.readAll();
+        f.close();
+        if (src.trimmed().isEmpty()) {
+            d.remove(fn);
+            continue;
+        }
+
+        // Read meta if available
+        QString origPath, savedAt;
+        QString metaPath = path;
+        metaPath.replace(".lua", ".meta");
+        QFile meta(metaPath);
+        if (meta.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream min(&meta);
+            while (!min.atEnd()) {
+                QString line = min.readLine();
+                if (line.startsWith("originalPath=")) origPath = line.mid(13);
+                else if (line.startsWith("savedAt=")) savedAt = line.mid(8);
+            }
+            meta.close();
+        }
+
+        QString msg = "An unsaved draft was found from a previous session.\n\n";
+        if (!origPath.isEmpty()) msg += "Original file: " + origPath + "\n";
+        if (!savedAt.isEmpty())  msg += "Last saved:    " + savedAt + "\n";
+        msg += "\nRecover the draft into the editor?";
+
+        auto ans = QMessageBox::question(this, "Recover unsaved draft", msg,
+            QMessageBox::Yes | QMessageBox::No | QMessageBox::Discard,
+            QMessageBox::Yes);
+
+        if (ans == QMessageBox::Yes) {
+            m_suppressDirty = true;
+            if (m_editor) m_editor->setPlainText(src);
+            m_suppressDirty = false;
+            // Apply the parsed Config to the form so the LCD preview etc. are correct.
+            auto parsed = LuaParser::parse(src);
+            if (parsed.ok) applyConfigToForm(parsed.config);
+            setCurrentFile(origPath);   // may be empty (was "untitled")
+            setDirty(true);             // it's still unsaved relative to disk
+            updateSyncIndicator();
+            if (m_simPanel) m_simPanel->loadSourceSilent(src);
+            statusBar()->showMessage("Recovered draft from previous session.", 5000);
+            // Don't delete it yet — let writeAutosave overwrite it once the
+            // user does something. Or let the user save explicitly.
+            return;  // Only recover the most recent one.
+        } else {
+            // Discard or No — drop this autosave so we don't keep asking.
+            d.remove(fn);
+            QFile::remove(metaPath);
+            if (ans == QMessageBox::Discard) return;
+        }
+    }
+}
+
+void MainWindow::fixupFormFromSimulator() {
+    if (!m_simPanel || !m_simPanel->isLoaded()) return;
+    ScriptConfig resolved;
+    QString warn;
+    if (!m_simPanel->resolveScriptConfig(resolved, &warn)) return;
+    if (resolved.menuItems.isEmpty()) return;
+
+    // Pull the form's current items, merge in the Lua-resolved IDs and
+    // ranges WITHOUT clobbering anything else. We match by position
+    // (index) — the menu_items array order is preserved through the
+    // regex parser, so item N from the regex matches item N from Lua.
+    QVector<MenuItem> formItems = m_menuItemsPanel->items();
+    if (formItems.size() != resolved.menuItems.size()) {
+        // Item count mismatch — trust Lua entirely.
+        formItems = resolved.menuItems;
+    } else {
+        for (int i = 0; i < formItems.size(); ++i) {
+            const auto& src = resolved.menuItems[i];
+            // Always overwrite the IDs and choice IDs (those are what
+            // the regex parser gets wrong). Keep the form's other
+            // fields if they were correctly parsed.
+            formItems[i].id = src.id;
+            formItems[i].group = src.group;
+            // Type & ranges — the form might be wrong if defaults
+            // referenced variables. Trust Lua.
+            formItems[i].type          = src.type;
+            formItems[i].min           = src.min;
+            formItems[i].max           = src.max;
+            formItems[i].incrementStep = src.incrementStep;
+            formItems[i].uom           = src.uom;
+            formItems[i].defaultValue  = src.defaultValue;
+            // For MULTI_CHOICE: replace choices entirely.
+            if (src.type == MenuItemType::MultiChoice) {
+                formItems[i].choices = src.choices;
+            }
+            // Keep the form's title (it's regex-readable from string literal).
+            if (src.title.isEmpty() == false && formItems[i].title.isEmpty()) {
+                formItems[i].title = src.title;
+            }
+        }
+    }
+
+    bool prev = m_suppressDirty;
+    m_suppressDirty = true;
+    m_menuItemsPanel->load(formItems);
+    if (m_lcdPreview) {
+        m_lcdPreview->clearLiveValues();
+        ScriptConfig snap = collectConfig();
+        m_lcdPreview->setItems(snap.menuItems, snap.name, snap.softButtonLabel);
+    }
+    if (m_simPanel) m_simPanel->setMenuItems(formItems);
+    m_suppressDirty = prev;
+}
+
+void MainWindow::cleanupAutosave() {
+    if (!m_autosavePath.isEmpty()) QFile::remove(m_autosavePath);
+    if (!m_autosaveMetaPath.isEmpty()) QFile::remove(m_autosaveMetaPath);
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent* e) {
@@ -315,6 +571,27 @@ void MainWindow::newScript() {
     if (m_simPanel) m_simPanel->loadSourceSilent(m_editor->toPlainText());
 }
 
+void MainWindow::newFromWizard() {
+    if (!maybeSave()) return;
+    WizardDialog wiz(this);
+    if (wiz.exec() != QDialog::Accepted) return;
+
+    ScriptConfig cfg = wiz.config();
+    QString src = wiz.generatedSource();
+
+    applyConfigToForm(cfg);
+    m_suppressDirty = true;
+    m_editor->setPlainText(src);
+    m_suppressDirty = false;
+    setCurrentFile(QString());
+    setDirty(true);
+    updateSyncIndicator();
+    if (m_simPanel) m_simPanel->loadSourceSilent(src);
+    statusBar()->showMessage(
+        "Wizard generated a script — read the comments, run Pre-flight, and try it in the simulator.",
+        8000);
+}
+
 void MainWindow::regenerate() {
     ScriptConfig cfg = collectConfig();
     QString existing = m_editor->toPlainText();
@@ -331,6 +608,44 @@ void MainWindow::regenerate() {
     m_suppressDirty = false;
     setDirty(true);
     updateSyncIndicator();
+
+    // Offer a diff if the user wants to see what changed (controlled by
+    // a QSettings flag — first call shows it; "don't show again" silences
+    // it forever).
+    QSettings s("zc95", "lua-builder");
+    bool showDiff = s.value("showRegenDiff", true).toBool();
+    if (showDiff && existing.trimmed() != code.trimmed()) {
+        auto hunks = LineDiff::diff(existing, code);
+        bool hasChanges = std::any_of(hunks.begin(), hunks.end(),
+            [](const LineDiff::Hunk& h) { return h.op != LineDiff::Op::Same; });
+        if (hasChanges) {
+            QDialog dlg(this);
+            dlg.setWindowTitle("Regenerated — what changed?");
+            dlg.resize(900, 600);
+            auto* outer = new QVBoxLayout(&dlg);
+            auto* hint = new QLabel(
+                "<b>Smart-merge result.</b> Red lines were removed, green lines were "
+                "added. Function bodies you wrote are preserved verbatim.",
+                &dlg);
+            hint->setWordWrap(true);
+            hint->setStyleSheet("padding: 6px; background:#2d2d30; color:#ddd;");
+            outer->addWidget(hint);
+            auto* browser = new QTextBrowser(&dlg);
+            browser->setHtml(LineDiff::toHtml(hunks));
+            outer->addWidget(browser, 1);
+            auto* row = new QHBoxLayout();
+            auto* dontShow = new QCheckBox("Don't show this dialog again", &dlg);
+            row->addWidget(dontShow);
+            row->addStretch();
+            auto* close = new QPushButton("Close", &dlg);
+            row->addWidget(close);
+            outer->addLayout(row);
+            connect(close, &QPushButton::clicked, &dlg, &QDialog::accept);
+            dlg.exec();
+            if (dontShow->isChecked()) s.setValue("showRegenDiff", false);
+        }
+    }
+
     statusBar()->showMessage("Regenerated Config block (function bodies preserved)", 3000);
 }
 
@@ -371,6 +686,140 @@ void MainWindow::runLinter() {
     m_issuesDock->show();
     m_issuesDock->raise();
     statusBar()->showMessage(QString("Linter: %1 issue(s)").arg(issues.size()), 3000);
+}
+
+void MainWindow::runPreflight() {
+    // 1) Lint
+    ScriptConfig cfg = collectConfig();
+    QString src = m_editor->toPlainText();
+    auto issues = Linter::lint(cfg, src);
+    m_issuesPanel->setIssues(issues);
+    m_issuesDock->show();
+    m_issuesDock->raise();
+
+    int errors = 0, warnings = 0, infos = 0;
+    for (const auto& i : issues) {
+        switch (i.severity) {
+            case IssueSeverity::Error: ++errors; break;
+            case IssueSeverity::Warning: ++warnings; break;
+            case IssueSeverity::Info: ++infos; break;
+        }
+    }
+
+    // 2) Smoke-run in a throwaway Lua runtime: load + Setup + 50 Loop ticks @ 20ms.
+    QString simErr;
+    bool loaded = false, setupOk = false, loopOk = true;
+    {
+        LuaRuntime rt;
+        loaded = rt.loadScript(src, &simErr);
+        if (loaded) {
+            setupOk = rt.callSetup(&simErr);
+            if (setupOk) {
+                for (int i = 1; i <= 50; ++i) {
+                    if (!rt.callLoop(i * 20.0, &simErr)) {
+                        loopOk = false;
+                        break;
+                    }
+                    rt.updatePulses();
+                }
+            }
+        }
+    }
+
+    // 3) Score and verdict.
+    int score = 100;
+    score -= 30 * errors;
+    score -= 8  * warnings;
+    if (!loaded) score -= 50;
+    if (!setupOk) score -= 20;
+    if (!loopOk) score -= 30;
+    score = qBound(0, score, 100);
+
+    QString verdict;
+    QString color;
+    if (errors > 0 || !loaded || !setupOk || !loopOk) {
+        verdict = "❌  Not ready";
+        color = "#ff6b6b";
+    } else if (warnings > 0) {
+        verdict = "⚠  Mostly OK";
+        color = "#ffd166";
+    } else {
+        verdict = "✓  Looks good";
+        color = "#6cd47a";
+    }
+
+    QString html;
+    html += QString("<h2 style='color:%1; margin-top:0;'>%2 — Confidence %3%</h2>")
+                .arg(color, verdict).arg(score);
+
+    html += "<table cellpadding='4' cellspacing='0' style='font-family:Consolas;'>";
+    auto row = [&](const QString& label, const QString& val, const QString& col) {
+        html += QString("<tr><td>%1</td><td style='color:%2;'>%3</td></tr>")
+                    .arg(label, col, val.toHtmlEscaped());
+    };
+    row("Lint errors",   QString::number(errors),   errors > 0 ? "#ff6b6b" : "#6cd47a");
+    row("Lint warnings", QString::number(warnings), warnings > 0 ? "#ffd166" : "#6cd47a");
+    row("Lint info",     QString::number(infos),    "#88ccff");
+    row("Loads in Lua",  loaded ? "yes" : "no",     loaded ? "#6cd47a" : "#ff6b6b");
+    row("Setup() runs",  loaded ? (setupOk ? "yes" : "FAILED") : "—",
+                         setupOk ? "#6cd47a" : (loaded ? "#ff6b6b" : "#888"));
+    row("Loop() x50",    setupOk ? (loopOk ? "yes" : "CRASHED") : "—",
+                         loopOk && setupOk ? "#6cd47a" : (setupOk ? "#ff6b6b" : "#888"));
+    html += "</table>";
+
+    if (!loaded || !setupOk || !loopOk) {
+        html += "<h3 style='color:#ff6b6b;'>Simulator error</h3>";
+        html += "<pre style='background:#1e1e1e; padding:6px; color:#ddd;'>"
+                + simErr.toHtmlEscaped() + "</pre>";
+    }
+
+    if (errors == 0 && warnings == 0 && loaded && setupOk && loopOk) {
+        html += "<p>Nothing flagged. The script loads cleanly and runs a "
+                "1-second simulation without crashing.</p>"
+                "<p><b>Reminder:</b> the simulator validates <i>logic</i>, "
+                "not electrical safety. Always start a real-hardware session "
+                "with the front-panel dial at zero and ramp up gradually.</p>";
+    } else if (errors > 0) {
+        html += "<p>Fix the <b>errors</b> before flashing. Double-click an "
+                "issue in the bottom panel to jump to its line.</p>";
+    } else {
+        html += "<p>The warnings won't prevent the script from running but "
+                "should be reviewed — they typically catch comfort or "
+                "safety issues.</p>";
+    }
+
+    QMessageBox box(this);
+    box.setWindowTitle("Pre-flight check");
+    box.setTextFormat(Qt::RichText);
+    box.setText(html);
+    box.setStandardButtons(QMessageBox::Ok);
+    box.exec();
+
+    statusBar()->showMessage(
+        QString("Pre-flight: %1 — %2 err / %3 warn").arg(verdict).arg(errors).arg(warnings), 5000);
+}
+
+void MainWindow::testMenuItem(int row) {
+    auto items = m_menuItemsPanel->items();
+    if (row < 0 || row >= items.size()) return;
+    const MenuItem& mi = items[row];
+
+    // Make sure the simulator has the latest script loaded.
+    if (!m_simPanel->isLoaded()) {
+        m_simPanel->loadSourceSilent(m_editor->toPlainText());
+    }
+    // Switch to the Simulator tab so the user sees what's happening.
+    m_rightTabs->setCurrentWidget(m_simPanel);
+
+    bool reacted = m_simPanel->testMenuItemDrive(mi);
+    if (reacted) {
+        statusBar()->showMessage(
+            QString("Test of \"%1\" — pattern reacted ✓").arg(mi.title), 5000);
+    } else {
+        statusBar()->showMessage(
+            QString("Test of \"%1\" — no reaction. Did you wire menu_id %2 in MinMaxChange/MultiChoiceChange?")
+                .arg(mi.title).arg(mi.id), 8000);
+    }
 }
 
 void MainWindow::loadCurrentEditorIntoSim() {
@@ -416,7 +865,9 @@ bool MainWindow::loadFile(const QString& path) {
             "Loaded file but could not parse Config block:\n" + result.warning);
     }
     setCurrentFile(path);
-    if (m_simPanel) m_simPanel->loadSourceSilent(source);
+    if (m_simPanel && m_simPanel->loadSourceSilent(source)) {
+        fixupFormFromSimulator();
+    }
     return true;
 }
 
@@ -441,6 +892,44 @@ bool MainWindow::saveScriptAs() {
     if (path.isEmpty()) return false;
     m_currentFile = path;
     return saveScript();
+}
+
+void MainWindow::explainScript() {
+    QString src = m_editor ? m_editor->toPlainText() : QString();
+    if (src.trimmed().isEmpty()) {
+        QMessageBox::information(this, "Explain",
+            "The editor is empty — nothing to explain. Load a preset or "
+            "generate a script first.");
+        return;
+    }
+    auto lines = Explainer::explain(src);
+    QString html = Explainer::toHtml(lines);
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("Explain this script");
+    dlg.resize(1100, 700);
+    auto* outer = new QVBoxLayout(&dlg);
+    auto* hint = new QLabel(
+        "<b>Plain-English explanation</b> — line by line. The right column is a best-effort, "
+        "naive translation of common idioms. Lines that don't match any pattern are left blank.",
+        &dlg);
+    hint->setWordWrap(true);
+    hint->setStyleSheet("padding: 6px; background:#2d2d30; color:#ddd;");
+    outer->addWidget(hint);
+
+    auto* browser = new QTextBrowser(&dlg);
+    browser->setOpenExternalLinks(false);
+    browser->setHtml(html);
+    outer->addWidget(browser, 1);
+
+    auto* btn = new QPushButton("Close", &dlg);
+    connect(btn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    auto* row = new QHBoxLayout();
+    row->addStretch();
+    row->addWidget(btn);
+    outer->addLayout(row);
+
+    dlg.exec();
 }
 
 void MainWindow::about() {
@@ -531,6 +1020,15 @@ void MainWindow::loadSettings() {
     if (!sp.isEmpty()) m_horizSplitter->restoreState(sp);
     m_recentFiles = s.value("recentFiles").toStringList();
     rebuildRecentFilesMenu();
+
+    // Beginner mode — default OFF for first-time users; persisted afterwards.
+    bool beginner = s.value("beginnerMode", false).toBool();
+    if (m_beginnerAction) {
+        m_beginnerAction->blockSignals(true);
+        m_beginnerAction->setChecked(beginner);
+        m_beginnerAction->blockSignals(false);
+    }
+    setBeginnerMode(beginner);
 }
 
 void MainWindow::saveSettings() {
@@ -539,6 +1037,23 @@ void MainWindow::saveSettings() {
     s.setValue("mainwindow/state", saveState());
     s.setValue("mainwindow/splitter", m_horizSplitter->saveState());
     s.setValue("recentFiles", m_recentFiles);
+    s.setValue("beginnerMode", m_beginnerMode);
+}
+
+void MainWindow::setBeginnerMode(bool beginner) {
+    m_beginnerMode = beginner;
+    if (m_configPanel) m_configPanel->setBeginnerMode(beginner);
+    if (m_functionsPanel) m_functionsPanel->setBeginnerMode(beginner);
+    if (m_beginnerBadge) m_beginnerBadge->setVisible(beginner);
+    for (QAction* a : m_quickPresetActions) {
+        if (a) a->setVisible(!beginner);
+    }
+    if (beginner) {
+        statusBar()->showMessage(
+            "Beginner mode ON — advanced controls hidden. Toggle in View → Beginner mode.", 5000);
+    } else {
+        statusBar()->showMessage("Beginner mode OFF — all controls visible.", 3000);
+    }
 }
 
 void MainWindow::loadOfficialScript(const QString& resourcePath) {
@@ -563,7 +1078,9 @@ void MainWindow::loadOfficialScript(const QString& resourcePath) {
     setCurrentFile(QString());
     setDirty(true);
     updateSyncIndicator();
-    if (m_simPanel) m_simPanel->loadSourceSilent(source);
+    if (m_simPanel && m_simPanel->loadSourceSilent(source)) {
+        fixupFormFromSimulator();
+    }
     statusBar()->showMessage("Loaded official script: " + resourcePath, 3000);
 }
 
@@ -627,6 +1144,8 @@ void MainWindow::loadPreset(const QString& presetName) {
     setCurrentFile(QString());
     setDirty(true);
     updateSyncIndicator();
-    if (m_simPanel) m_simPanel->loadSourceSilent(m_editor->toPlainText());
+    if (m_simPanel && m_simPanel->loadSourceSilent(m_editor->toPlainText())) {
+        fixupFormFromSimulator();
+    }
     statusBar()->showMessage("Loaded preset: " + presetName, 3000);
 }

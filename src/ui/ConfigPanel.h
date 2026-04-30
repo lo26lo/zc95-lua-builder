@@ -7,6 +7,7 @@ class QLineEdit;
 class QComboBox;
 class QSpinBox;
 class QCheckBox;
+class QFormLayout;
 
 class ConfigPanel : public QWidget {
     Q_OBJECT
@@ -15,6 +16,10 @@ public:
 
     void load(const ScriptConfig& config);
     void save(ScriptConfig& config) const;
+
+    // Hide advanced fields in beginner mode (loop frequency,
+    // BT passthrough, allow triphase).
+    void setBeginnerMode(bool beginner);
 
 signals:
     void changed();
@@ -26,4 +31,6 @@ private:
     QSpinBox* m_loopFreq;
     QCheckBox* m_allowTriphase;
     QCheckBox* m_btPassthrough;
+
+    QFormLayout* m_form = nullptr;
 };

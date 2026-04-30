@@ -25,17 +25,37 @@ MenuItemDialog::MenuItemDialog(QWidget* parent) : QDialog(parent) {
     m_type->addItem("MULTI_CHOICE", static_cast<int>(MenuItemType::MultiChoice));
     m_type->addItem("AUDIO_VIEW_INTENSITY_STEREO", static_cast<int>(MenuItemType::AudioViewIntensityStereo));
     m_type->addItem("AUDIO_VIEW_INTENSITY_MONO", static_cast<int>(MenuItemType::AudioViewIntensityMono));
+    m_type->setToolTip(
+        "MIN_MAX        — a slider with min/max/step (e.g. delay in ms,\n"
+        "                 frequency in Hz, intensity in %).\n"
+        "MULTI_CHOICE   — a list of named options (e.g. mode = Pulse / Fade /\n"
+        "                 Constant). The user cycles through them on-screen.\n"
+        "AUDIO_VIEW_*   — decorative VU-meter on the LCD. Requires\n"
+        "                 audio_processing_mode = AUDIO_INTENSITY in Config.");
     form->addRow("Type:", m_type);
 
     m_id = new QSpinBox(this);
     m_id->setRange(1, 99);
+    m_id->setToolTip(
+        "Numeric ID used by your script to identify this item.\n"
+        "Inside MinMaxChange(menu_id, val) you'll write\n"
+        "  if (menu_id == <this ID>) then ... end\n"
+        "IDs must be unique across all menu items.");
     form->addRow("ID:", m_id);
 
     m_group = new QSpinBox(this);
     m_group->setRange(0, 99);
+    m_group->setToolTip(
+        "Group number — items with the same group are shown together on\n"
+        "screen. Leave at 0 unless you have many items and want to organise\n"
+        "them.");
     form->addRow("Group:", m_group);
 
     m_title = new QLineEdit(this);
+    m_title->setToolTip(
+        "Label shown on the LCD. Keep it short (≤ 14 chars).\n"
+        "It also becomes the auto-generated Lua variable name in your\n"
+        "script — \"Delay (ms)\" → variable _delay_ms.");
     form->addRow("Title:", m_title);
 
     outer->addLayout(form);
@@ -47,14 +67,33 @@ MenuItemDialog::MenuItemDialog(QWidget* parent) : QDialog(parent) {
     auto* mmForm = new QFormLayout(minMaxPage);
     m_min = new QSpinBox(this);
     m_min->setRange(-100000, 100000);
+    m_min->setToolTip("Lowest value the user can dial in.");
     m_max = new QSpinBox(this);
     m_max->setRange(-100000, 100000);
+    m_max->setToolTip("Highest value the user can dial in.\n"
+        "Common ceilings:\n"
+        "  Frequency:    250 Hz (above feels harsh)\n"
+        "  Pulse width:  200 µs (above is intense)\n"
+        "  Power:       1000   (the firmware caps here anyway)\n"
+        "  Delay:      10000 ms (zc.DelayMs maximum)");
     m_step = new QSpinBox(this);
     m_step->setRange(1, 100000);
+    m_step->setToolTip(
+        "How much the value jumps each time the user turns the encoder.\n"
+        "Typical: 1 for fine control, 10/50/100 for coarse sliders,\n"
+        "         5 Hz for frequency, 10 µs for pulse width.");
     m_uom = new QLineEdit(this);
     m_uom->setPlaceholderText("e.g. ms, Hz, us, %");
+    m_uom->setToolTip(
+        "Unit of measure — appended to the value on the LCD.\n"
+        "Examples: \"ms\" (delay), \"Hz\" (frequency), \"us\" (pulse width),\n"
+        "          \"%\" (percentage), \"\" (dimensionless).");
     m_default = new QSpinBox(this);
     m_default->setRange(-100000, 100000);
+    m_default->setToolTip(
+        "Initial value when the pattern is loaded. MUST be inside [Min, Max].\n"
+        "Tip for safety: pick a default that's MILD, not maximal — the user\n"
+        "should choose to crank it up, not start there.");
     mmForm->addRow("Min:", m_min);
     mmForm->addRow("Max:", m_max);
     mmForm->addRow("Increment step:", m_step);

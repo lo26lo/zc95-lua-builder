@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ChannelEvent.h"
+#include "../model/ScriptConfig.h"
 #include <QObject>
 #include <QString>
 #include <QVector>
@@ -16,6 +17,13 @@ public:
     // Reset interpreter and load source. Returns false on syntax/runtime error
     // during chunk load; the error is placed in *error.
     bool loadScript(const QString& source, QString* error = nullptr);
+
+    // Read the Config global as a ScriptConfig. Must be called AFTER
+    // loadScript. Returns true on success — fills `out` with the
+    // Lua-evaluated values, including any menu_item IDs that were
+    // expressed as identifiers (MenuId.FREQ etc.) instead of literals.
+    // The regex parser can't resolve those; this method can.
+    bool extractScriptConfig(ScriptConfig& out, QString* warning = nullptr) const;
 
     bool callSetup(QString* error = nullptr);                    // optional
     bool callLoop(double time_ms, QString* error = nullptr);     // mandatory

@@ -11,6 +11,16 @@ extern "C" {
 
 namespace {
 constexpr const char* kSelfRegistryKey = "zc95_LuaRuntime_self";
+
+// Lua 5.4's luaL_checkinteger rejects floats unless they have an exact
+// integer representation. Many official scripts pass numbers that come
+// out of math.* / arithmetic and are therefore floats (e.g. 22.0). The
+// real ZC95 firmware is tolerant — it just truncates. Mirror that here.
+inline lua_Integer checkIntLike(lua_State* L, int arg) {
+    lua_Number n = luaL_checknumber(L, arg);
+    // Round toward zero, matching what (int)cast does in C.
+    return (lua_Integer) n;
+}
 }
 
 LuaRuntime* LuaRuntime::self(lua_State* L) {
@@ -192,6 +202,117 @@ bool LuaRuntime::loadScript(const QString& source, QString* error) {
     return true;
 }
 
+// Helper: Lua field reader (returns "" if missing/wrong type).
+static QString luaGetStringField(lua_State* L, int idx, const char* key,
+                                 const QString& fallback = QString()) {
+    lua_getfield(L, idx, key);
+    QString r = fallback;
+    if (lua_isstring(L, -1)) r = QString::fromUtf8(lua_tostring(L, -1));
+    lua_pop(L, 1);
+    return r;
+}
+static int luaGetIntField(lua_State* L, int idx, const char* key, int fallback = 0) {
+    lua_getfield(L, idx, key);
+    int r = fallback;
+    if (lua_isnumber(L, -1)) r = (int)lua_tonumber(L, -1);
+    lua_pop(L, 1);
+    return r;
+}
+static bool luaGetBoolField(lua_State* L, int idx, const char* key, bool fallback = false) {
+    lua_getfield(L, idx, key);
+    bool r = fallback;
+    if (lua_isboolean(L, -1)) r = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    return r;
+}
+
+bool LuaRuntime::extractScriptConfig(ScriptConfig& out, QString* warning) const {
+    out = ScriptConfig{};
+    lua_getglobal(L, "Config");
+    if (!lua_istable(L, -1)) {
+        if (warning) *warning = "No Config table found in Lua state.";
+        lua_pop(L, 1);
+        return false;
+    }
+    int cfg = lua_gettop(L);
+
+    out.name = luaGetStringField(L, cfg, "name", "MyPattern");
+    QString audio = luaGetStringField(L, cfg, "audio_processing_mode", "OFF");
+    out.audioMode = (audio == "AUDIO_INTENSITY") ? AudioMode::AudioIntensity : AudioMode::Off;
+    out.softButtonLabel = luaGetStringField(L, cfg, "soft_button");
+    out.loopFreqHz = luaGetIntField(L, cfg, "loop_freq_hz", 0);
+    out.allowTriphase = luaGetBoolField(L, cfg, "allow_triphase");
+    out.bluetoothRemotePassthrough = luaGetBoolField(L, cfg, "bluetooth_remote_passthrough");
+
+    // menu_items array
+    lua_getfield(L, cfg, "menu_items");
+    if (lua_istable(L, -1)) {
+        int items = lua_gettop(L);
+        int n = (int)lua_rawlen(L, items);
+        for (int i = 1; i <= n; ++i) {
+            lua_rawgeti(L, items, i);
+            if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
+            int mi = lua_gettop(L);
+            MenuItem it;
+            QString tstr = luaGetStringField(L, mi, "type", "MIN_MAX");
+            if (tstr == "MIN_MAX")                            it.type = MenuItemType::MinMax;
+            else if (tstr == "MULTI_CHOICE")                  it.type = MenuItemType::MultiChoice;
+            else if (tstr == "AUDIO_VIEW_INTENSITY_STEREO")   it.type = MenuItemType::AudioViewIntensityStereo;
+            else if (tstr == "AUDIO_VIEW_INTENSITY_MONO")     it.type = MenuItemType::AudioViewIntensityMono;
+            it.title = luaGetStringField(L, mi, "title");
+            it.id    = luaGetIntField(L, mi, "id", i);
+            it.group = luaGetIntField(L, mi, "group", 0);
+            if (it.type == MenuItemType::MinMax) {
+                it.min          = luaGetIntField(L, mi, "min", 0);
+                it.max          = luaGetIntField(L, mi, "max", 100);
+                it.incrementStep = luaGetIntField(L, mi, "increment_step", 1);
+                it.uom          = luaGetStringField(L, mi, "uom");
+                it.defaultValue = luaGetIntField(L, mi, "default", it.min);
+            } else if (it.type == MenuItemType::MultiChoice) {
+                lua_getfield(L, mi, "choices");
+                if (lua_istable(L, -1)) {
+                    int ch = lua_gettop(L);
+                    int cn = (int)lua_rawlen(L, ch);
+                    for (int j = 1; j <= cn; ++j) {
+                        lua_rawgeti(L, ch, j);
+                        if (lua_istable(L, -1)) {
+                            MultiChoiceOption opt;
+                            opt.choiceId = luaGetIntField(L, lua_gettop(L), "choice_id", j);
+                            opt.description = luaGetStringField(L, lua_gettop(L), "description");
+                            it.choices.push_back(opt);
+                        }
+                        lua_pop(L, 1);
+                    }
+                }
+                lua_pop(L, 1); // choices
+            }
+            out.menuItems.push_back(it);
+            lua_pop(L, 1); // mi
+        }
+    }
+    lua_pop(L, 1); // menu_items
+
+    // Detect callbacks by checking globals.
+    auto hasFn = [&](const char* name) {
+        lua_getglobal(L, name);
+        bool b = lua_isfunction(L, -1);
+        lua_pop(L, 1);
+        return b;
+    };
+    out.functions.setup                    = hasFn("Setup");
+    out.functions.loop                     = hasFn("Loop");
+    out.functions.minMaxChange             = hasFn("MinMaxChange");
+    out.functions.multiChoiceChange        = hasFn("MultiChoiceChange");
+    out.functions.softButton               = hasFn("SoftButton");
+    out.functions.externalTrigger          = hasFn("ExternalTrigger");
+    out.functions.bluetoothRemoteKeypress  = hasFn("BluetoothRemoteKeypress");
+    out.functions.bluetoothHidEvent        = hasFn("BluetoothHidEvent");
+    out.functions.audioIntensityChange     = hasFn("AudioIntensityChange");
+
+    lua_pop(L, 1); // Config
+    return true;
+}
+
 bool LuaRuntime::callOptional(const char* name, int nargs, int nresults, QString* error) {
     lua_getglobal(L, name);
     if (!lua_isfunction(L, -1)) {
@@ -300,7 +421,7 @@ void LuaRuntime::updatePulses() {
 
 int LuaRuntime::api_ChannelOn(lua_State* L) {
     auto* self_ = self(L);
-    int ch = (int)luaL_checkinteger(L, 1);
+    int ch = (int)checkIntLike(L, 1);
     if (ch >= 1 && ch <= 4) {
         auto& s = self_->m_state.channels[ch - 1];
         s.on = true;
@@ -316,7 +437,7 @@ int LuaRuntime::api_ChannelOn(lua_State* L) {
 
 int LuaRuntime::api_ChannelOff(lua_State* L) {
     auto* self_ = self(L);
-    int ch = (int)luaL_checkinteger(L, 1);
+    int ch = (int)checkIntLike(L, 1);
     if (ch >= 1 && ch <= 4) {
         auto& s = self_->m_state.channels[ch - 1];
         s.on = false;
@@ -332,8 +453,8 @@ int LuaRuntime::api_ChannelOff(lua_State* L) {
 
 int LuaRuntime::api_ChannelPulseMs(lua_State* L) {
     auto* self_ = self(L);
-    int ch = (int)luaL_checkinteger(L, 1);
-    int dur = (int)luaL_checkinteger(L, 2);
+    int ch = (int)checkIntLike(L, 1);
+    int dur = (int)checkIntLike(L, 2);
     if (ch >= 1 && ch <= 4) {
         auto& s = self_->m_state.channels[ch - 1];
         s.on = true;
@@ -350,8 +471,8 @@ int LuaRuntime::api_ChannelPulseMs(lua_State* L) {
 
 int LuaRuntime::api_SetPower(lua_State* L) {
     auto* self_ = self(L);
-    int ch = (int)luaL_checkinteger(L, 1);
-    int pw = (int)luaL_checkinteger(L, 2);
+    int ch = (int)checkIntLike(L, 1);
+    int pw = (int)checkIntLike(L, 2);
     if (ch >= 1 && ch <= 4) self_->m_state.channels[ch - 1].power = pw;
     ChannelEvent e;
     e.timeMs = self_->m_currentTimeMs;
@@ -364,8 +485,8 @@ int LuaRuntime::api_SetPower(lua_State* L) {
 
 int LuaRuntime::api_SetFrequency(lua_State* L) {
     auto* self_ = self(L);
-    int ch = (int)luaL_checkinteger(L, 1);
-    int hz = (int)luaL_checkinteger(L, 2);
+    int ch = (int)checkIntLike(L, 1);
+    int hz = (int)checkIntLike(L, 2);
     if (ch >= 1 && ch <= 4) self_->m_state.channels[ch - 1].frequencyHz = hz;
     ChannelEvent e;
     e.timeMs = self_->m_currentTimeMs;
@@ -378,9 +499,9 @@ int LuaRuntime::api_SetFrequency(lua_State* L) {
 
 int LuaRuntime::api_SetPulseWidth(lua_State* L) {
     auto* self_ = self(L);
-    int ch = (int)luaL_checkinteger(L, 1);
-    int pos = (int)luaL_checkinteger(L, 2);
-    int neg = (int)luaL_checkinteger(L, 3);
+    int ch = (int)checkIntLike(L, 1);
+    int pos = (int)checkIntLike(L, 2);
+    int neg = (int)checkIntLike(L, 3);
     if (ch >= 1 && ch <= 4) {
         self_->m_state.channels[ch - 1].pulseWidthPosUs = pos;
         self_->m_state.channels[ch - 1].pulseWidthNegUs = neg;
@@ -397,8 +518,8 @@ int LuaRuntime::api_SetPulseWidth(lua_State* L) {
 
 int LuaRuntime::api_SetMenuOption(lua_State* L) {
     auto* self_ = self(L);
-    int id = (int)luaL_checkinteger(L, 1);
-    int val = (int)luaL_checkinteger(L, 2);
+    int id = (int)checkIntLike(L, 1);
+    int val = (int)checkIntLike(L, 2);
     // We don't actually re-fire MinMaxChange asynchronously in the simulator;
     // log the call so the user sees what would happen on the device.
     self_->m_output += QString("[SetMenuOption] id=%1 value=%2\n").arg(id).arg(val);
@@ -407,7 +528,7 @@ int LuaRuntime::api_SetMenuOption(lua_State* L) {
 
 int LuaRuntime::api_DelayMs(lua_State* L) {
     auto* self_ = self(L);
-    int ms = (int)luaL_checkinteger(L, 1);
+    int ms = (int)checkIntLike(L, 1);
     self_->m_currentTimeMs += ms;
     ChannelEvent e;
     e.timeMs = self_->m_currentTimeMs;
@@ -431,9 +552,9 @@ int LuaRuntime::api_EnableTriphase(lua_State* L) {
 
 int LuaRuntime::api_LinkChannels(lua_State* L) {
     auto* self_ = self(L);
-    int lead = (int)luaL_checkinteger(L, 1);
-    int linked = (int)luaL_checkinteger(L, 2);
-    int off = (int)luaL_checkinteger(L, 3);
+    int lead = (int)checkIntLike(L, 1);
+    int linked = (int)checkIntLike(L, 2);
+    int off = (int)checkIntLike(L, 3);
     ChannelEvent e;
     e.timeMs = self_->m_currentTimeMs;
     e.type = ChannelEventType::LinkChannels;
@@ -446,7 +567,7 @@ int LuaRuntime::api_LinkChannels(lua_State* L) {
 
 int LuaRuntime::api_AccIoWrite(lua_State* L) {
     auto* self_ = self(L);
-    int line = (int)luaL_checkinteger(L, 1);
+    int line = (int)checkIntLike(L, 1);
     bool state = lua_toboolean(L, 2);
     if (line >= 1 && line <= 3) self_->m_state.accIo[line - 1] = state;
     ChannelEvent e;

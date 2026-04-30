@@ -2,6 +2,7 @@
 
 #include <QRegularExpression>
 #include <QSet>
+#include <climits>
 
 QString Issue::severityText() const {
     switch (severity) {
@@ -304,6 +305,159 @@ void Linter::lintSource(const ScriptConfig& config, const QString& source, QVect
         out.push_back({IssueSeverity::Warning, -1,
             "No top-level function Loop(time_ms) found.",
             "Loop() is the mandatory entry point that runs continuously."});
+    }
+
+    // -----------------------------------------------------------------
+    // Safety rules — these are about user comfort and electrical safety,
+    // not Lua correctness. They lean to the conservative side and can
+    // be silenced by tightening the offending value.
+    // -----------------------------------------------------------------
+
+    // S1. SetFrequency above 250 Hz — comfort warning.
+    {
+        QRegularExpression re(R"(zc\.SetFrequency\s*\(\s*(-?\d+)\s*,\s*(\d+)\s*\))");
+        auto it = re.globalMatch(clean);
+        while (it.hasNext()) {
+            auto m = it.next();
+            int hz = m.captured(2).toInt();
+            if (hz > 250 && hz <= 300) {
+                out.push_back({IssueSeverity::Warning, lineOf(m.capturedStart()),
+                    QString("zc.SetFrequency(%1) — frequencies above 250 Hz can feel harsh.").arg(hz),
+                    "Consider exposing this as a MIN_MAX menu item so the user can tune down."});
+            }
+        }
+    }
+
+    // S2. SetPulseWidth above 200 µs — intensity warning.
+    {
+        QRegularExpression re(R"(zc\.SetPulseWidth\s*\(\s*(-?\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\))");
+        auto it = re.globalMatch(clean);
+        while (it.hasNext()) {
+            auto m = it.next();
+            int pos = m.captured(2).toInt();
+            int neg = m.captured(3).toInt();
+            int wmax = qMax(pos, neg);
+            if (wmax > 200 && wmax <= 255) {
+                out.push_back({IssueSeverity::Warning, lineOf(m.capturedStart()),
+                    QString("zc.SetPulseWidth(%1, %2) — pulse widths above 200 µs deliver a lot of charge.").arg(pos).arg(neg),
+                    "Combined with high power this can be very intense. Start lower and ramp up."});
+            }
+        }
+    }
+
+    // S3. SetPower(*, 1000) hard-coded in Setup — no headroom for the user.
+    // Also flag SetPower(*, X) with X >= 800 if no MIN_MAX menu item exists.
+    {
+        bool hasMinMaxMenu = std::any_of(config.menuItems.begin(), config.menuItems.end(),
+            [](const MenuItem& m) { return m.type == MenuItemType::MinMax; });
+
+        QRegularExpression re(R"(zc\.SetPower\s*\(\s*(-?\d+)\s*,\s*(\d+)\s*\))");
+        auto it = re.globalMatch(clean);
+        while (it.hasNext()) {
+            auto m = it.next();
+            int pwr = m.captured(2).toInt();
+            if (pwr >= 800 && !hasMinMaxMenu) {
+                out.push_back({IssueSeverity::Warning, lineOf(m.capturedStart()),
+                    QString("zc.SetPower(*, %1) is hard-coded high and there's no MIN_MAX menu to dial it down.").arg(pwr),
+                    "Add a MIN_MAX item (\"Intensity\" 0-1000) and use the value here instead of a literal."});
+                break;  // one warning is enough — don't spam
+            }
+        }
+    }
+
+    // S4. Kill-switch detection — at least one of:
+    //   • SoftButton callback ticked,
+    //   • ExternalTrigger callback ticked,
+    //   • A MULTI_CHOICE menu item that looks like an off/on switch
+    //     (we don't inspect the choices' wording — too fragile — but
+    //      at least the script can be paused via the front-panel knob
+    //      if a MULTI_CHOICE exists at all).
+    // The front-panel power dial is always the ultimate kill-switch on
+    // real hardware, so this is informational, not an error.
+    {
+        const auto& f = config.functions;
+        bool hasMultiChoice = std::any_of(config.menuItems.begin(), config.menuItems.end(),
+            [](const MenuItem& m) { return m.type == MenuItemType::MultiChoice; });
+        bool hasSwitchableMode = f.softButton || f.externalTrigger || hasMultiChoice;
+        if (!hasSwitchableMode) {
+            out.push_back({IssueSeverity::Warning, -1,
+                "No software kill-switch in this pattern.",
+                "Tick SoftButton in Functions and label it in Config — gives you a one-tap stop. "
+                "(The front-panel power dial is always available as a hardware fallback.)"});
+        }
+    }
+
+    // S5. EnableTriphase / LinkChannels usage when allow_triphase is set — info only.
+    {
+        QRegularExpression re(R"(\bzc\.EnableTriphase\s*\(\s*true\s*\))");
+        auto m = re.match(clean);
+        if (m.hasMatch() && config.allowTriphase) {
+            out.push_back({IssueSeverity::Info, lineOf(m.capturedStart()),
+                "Triphase enabled — channel isolation is OFF, currents from different channels can combine.",
+                "Pay extra attention to electrode placement. See ZC95 safety docs."});
+        }
+    }
+
+    // S6. Loop body looks empty (no zc.* calls in the file at all) — info.
+    {
+        bool hasLoopFn = clean.contains(QRegularExpression(R"(\bfunction\s+Loop\s*\()"));
+        bool anyZcCall = clean.contains(QRegularExpression(R"(\bzc\.[A-Za-z_]+\s*\()"));
+        if (hasLoopFn && !anyZcCall) {
+            out.push_back({IssueSeverity::Info, -1,
+                "No zc.* calls anywhere in the script.",
+                "The pattern won't drive any channel — did you forget to write the body?"});
+        }
+    }
+
+    // S7. Loop calls SetPower(*, X>=800) on every tick — likely a runaway.
+    // Heuristic: if SetPower with a high literal occurs INSIDE a function
+    // named Loop and there's no surrounding `if`, that's a smell.
+    // We do a naive scan: for each high SetPower, walk backward in the
+    // sanitized text to the most recent `function Loop(`. If found and
+    // there's no `if `/`elseif ` token between Loop's start and the call,
+    // we warn.
+    {
+        QRegularExpression callRe(R"(zc\.SetPower\s*\(\s*-?\d+\s*,\s*(\d+)\s*\))");
+        QRegularExpression loopStartRe(R"(\bfunction\s+Loop\s*\()");
+        QRegularExpression loopEndRe(R"(\bend\b)");
+        auto loopMatch = loopStartRe.match(clean);
+        if (loopMatch.hasMatch()) {
+            int loopStart = loopMatch.capturedEnd();
+            // Find the matching `end` — naive: walk forward through
+            // function/if/for/while/do depth.
+            int depth = 1;
+            int i = loopStart;
+            QRegularExpression openersRe(R"(\b(function|if|for|while|do|repeat)\b)");
+            int loopEnd = clean.length();
+            while (i < clean.length()) {
+                auto m1 = openersRe.match(clean, i);
+                auto m2 = loopEndRe.match(clean, i);
+                int p1 = m1.hasMatch() ? m1.capturedStart() : INT_MAX;
+                int p2 = m2.hasMatch() ? m2.capturedStart() : INT_MAX;
+                if (p1 == INT_MAX && p2 == INT_MAX) break;
+                if (p1 < p2) { ++depth; i = m1.capturedEnd(); }
+                else { --depth; i = m2.capturedEnd(); if (depth == 0) { loopEnd = m2.capturedStart(); break; } }
+            }
+
+            QString loopBody = clean.mid(loopStart, loopEnd - loopStart);
+            auto it = callRe.globalMatch(loopBody);
+            while (it.hasNext()) {
+                auto m = it.next();
+                int pwr = m.captured(1).toInt();
+                if (pwr < 800) continue;
+                // Look at the preceding 80 characters for an `if `/`elseif `
+                int callPos = m.capturedStart();
+                int lookback = qMax(0, callPos - 80);
+                QString prefix = loopBody.mid(lookback, callPos - lookback);
+                if (!prefix.contains(QRegularExpression(R"(\b(if|elseif)\b)"))) {
+                    int absPos = loopStart + callPos;
+                    out.push_back({IssueSeverity::Warning, lineOf(absPos),
+                        QString("Unconditional zc.SetPower(*, %1) inside Loop — runs every tick.").arg(pwr),
+                        "Wrap it in `if` so it only runs on state changes, or move it to Setup()."});
+                    break;
+                }
+            }
+        }
     }
 }
 
