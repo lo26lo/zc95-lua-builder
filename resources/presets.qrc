@@ -1,0 +1,20 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/presets">
+        <file alias="climb.lua">../lua_Script/climb.lua</file>
+        <file alias="combo.lua">../lua_Script/combo.lua</file>
+        <file alias="intense.lua">../lua_Script/intense.lua</file>
+        <file alias="orgasm.lua">../lua_Script/orgasm.lua</file>
+        <file alias="phasing2.lua">../lua_Script/phasing2.lua</file>
+        <file alias="random2.lua">../lua_Script/random2.lua</file>
+        <file alias="rhythm.lua">../lua_Script/rhythm.lua</file>
+        <file alias="stroke.lua">../lua_Script/stroke.lua</file>
+        <file alias="tens.lua">../lua_Script/tens.lua</file>
+        <file alias="torment.lua">../lua_Script/torment.lua</file>
+        <file alias="trifade.lua">../lua_Script/trifade.lua</file>
+        <file alias="waves.lua">../lua_Script/waves.lua</file>
+    </qresource>
+    <qresource prefix="/presets/lib">
+        <file alias="ettot.lua">../lua_Script/lib/ettot.lua</file>
+    </qresource>
+</RCC>
