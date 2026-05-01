@@ -13,6 +13,25 @@
 
 ---
 
+<p align="center">
+  <img src="pictures/01-overview.png" alt="Main window — form on the left, editor / simulator on the right" width="800">
+  <br><i>Main window: form-driven editor on the left, Lua editor and embedded simulator on the right.</i>
+</p>
+
+<p align="center">
+  <img src="pictures/02-wizard.png" alt="New-pattern wizard with side info panel" width="800">
+  <br><i>The 6-step wizard, with a contextual side panel explaining each choice's feeling, recommendation and warnings.</i>
+</p>
+
+<p align="center">
+  <img src="pictures/03-simulator.png" alt="Simulator with live menu controls and 4-channel timeline" width="800">
+  <br><i>Embedded Lua 5.4 simulator: live MIN_MAX / MULTI_CHOICE controls drive the script in real time, the 4-lane timeline shows channel activity with a high-visibility yellow now-cursor.</i>
+</p>
+
+> Drop your screenshots into `pictures/01-overview.png`, `pictures/02-wizard.png`, `pictures/03-simulator.png` to populate the gallery above.
+
+---
+
 A desktop GUI for visually authoring, simulating and debugging Lua patterns
 for the [ZC95](https://github.com/CrashOverride85/zc95) e-stim controller.
 

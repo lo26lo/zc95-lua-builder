@@ -356,16 +356,29 @@ A live mock-up of how the ZC95 LCD will display your pattern:
 
 - Title bar: `U: <name>` (`U:` like the device shows for user scripts).
 - One row per menu item:
-  - **MIN_MAX** — bar graph filled to `(default - min) / (max - min)`,
+  - **MIN_MAX** — bar graph filled to `(value - min) / (max - min)`,
     with the value and unit on the right.
-  - **MULTI_CHOICE** — `< first_choice_description >` (only the first
-    option is shown in the static preview).
+  - **MULTI_CHOICE** — `< description >` of the currently-selected
+    choice.
   - **AUDIO_VIEW_INTENSITY_*** — pseudo-waveform fill.
 - Footer: the soft-button label in `[brackets]`, if any.
 - `+N more` if the menu has more items than fit on screen.
 
 The preview re-paints on every form change, so you can tune the layout
 without leaving the form.
+
+#### Live mirror of the simulator
+
+When you move a slider in the **Simulator** tab's *Menu controls (live)*
+section, the matching MIN_MAX bar in the LCD Preview updates **in real
+time**. Same for MULTI_CHOICE combos. This lets you see exactly what
+the user will see on the device LCD as the script runs.
+
+The mechanism is simple: each `MenuItem` has an internal *override map*
+keyed by `menu_id`. Moving the simulator slider sets the override; the
+LCD preview's `paintEvent` reads the override if present, otherwise
+falls back to the form's `default` value. Loading a different script
+clears all overrides.
 
 ---
 
@@ -475,7 +488,7 @@ Open the **Simulator** tab on the right pane.
 |--------|--------|
 | **▶ Run** | Calls `Setup()` once (first time after Reset/Load), then ticks `Loop(time_ms)` continuously. If no script is loaded, the current editor is auto-loaded silently. |
 | **⏸ Pause** | Stops the timer. State is preserved — press Run again to resume. |
-| **⟲ Reset** | Stops the timer, resets simulated time to 0, clears events, re-arms `Setup()` for the next Run. Does **not** re-load the source — use Ctrl+R for that. |
+| **⟲ Reset** | Stops the timer, resets simulated time to 0, clears events, **reloads the cached source into a fresh `lua_State`**, re-arms `Setup()` for the next Run. After Reset every global goes back to its initial value (no stale schedulers from the previous Run). |
 | **Step** | Advance one tick (one `Loop` call) without auto-running. |
 | **Soft Btn** | While held, calls `SoftButton(true)`; on release, `SoftButton(false)`. |
 | **Trigger 1A** | One-shot: `ExternalTrigger("TRIGGER1", "A", true)` immediately followed by `(false)`. |
@@ -515,11 +528,21 @@ If the script doesn't react when you move the slider, you've probably:
 ### Timeline
 
 - 4 horizontal lanes (CH1 to CH4).
-- Green segments = sustained ON ranges (between `ChannelOn` and
-  `ChannelOff`).
-- Orange segments = `ChannelPulseMs` events with their declared duration.
-- Dashed vertical line = "now". The timeline is a 5s sliding window.
+- **Green segments** = sustained ON ranges (between `ChannelOn` and
+  `ChannelOff`). Adjacent same-color segments merge into a single
+  visual blob — no per-segment outlines, so you don't mistake pulse
+  edges for cursors.
+- **Orange segments** = `ChannelPulseMs` events with their declared
+  duration.
+- **Yellow now-cursor**: a high-contrast vertical marker pinned to the
+  rightmost (current) timestamp. Three layers — a 12 px translucent
+  yellow halo, a 3 px solid yellow line, a 1 px white core — plus a
+  triangle at the top and bottom. Designed to remain visible even on
+  fully-saturated channels.
 - X-axis: seconds with one decimal.
+
+The timeline is a 5 s sliding window — once simulated time exceeds 5 s
+the window starts to scroll, and the cursor stays at the right edge.
 
 ### Log
 
@@ -747,6 +770,60 @@ of `Ctrl+G`: it reads the editor and updates the form to match.
 - `print()` is overridden to capture output instead of writing to
   stdout — log lines surface in the simulator log prefixed with `[LUA]`.
 - The `zc.*` table is registered with C trampolines — see below.
+- **Reset reloads the script** into a fresh `lua_State` from a cached
+  copy of the source. Without this, a 2nd Run after Reset would inherit
+  every global from the end of Run 1 (e.g. `_burst_next_burst_ms` in
+  TENS pointing 5 s into the future, making the pattern silent until
+  simulated time catches up).
+
+### Numeric argument tolerance
+
+Lua 5.4's `luaL_checkinteger` rejects floating-point numbers even when
+they have an exact integer representation (e.g. `22.0`). Many official
+scripts produce floats from `math.*` calls and pass them straight to
+`zc.SetFrequency` etc. — which would crash with
+`bad argument #2 to 'SetFrequency' (number has no integer representation)`.
+
+To match what the real device firmware does, the simulator uses a
+`checkIntLike()` helper that calls `luaL_checknumber` and truncates
+toward zero. Floats are accepted; their fractional parts are discarded.
+
+### Setup() argument
+
+`LuaRuntime::callSetup` pushes `m_currentTimeMs` (= 0 at startup) as a
+single argument before calling `Setup`. Lua silently ignores extra
+arguments for scripts that declare `function Setup()` without any
+parameter, so this is invisible to most scripts. But `trifade.lua`
+declares `function Setup(time_ms)` and assigns
+`_step_start_time_ms = time_ms` — without the argument, that global
+becomes `nil` and the next Loop tick crashes on arithmetic.
+
+### Resolving identifier-based menu IDs
+
+Most official scripts express menu IDs as Lua identifiers:
+
+```lua
+MenuId = { MODE = 1, FREQ = 2, PULSE_WIDTH = 3, ... }
+Config = {
+    menu_items = {
+        { id = MenuId.FREQ, ... },
+        ...
+    }
+}
+```
+
+The regex parser (`LuaParser`) is purely textual and reads `MenuId.FREQ`
+as the literal text — `toInt()` of that returns 0. Result: every menu
+item ends up with `id = 0`, they collide in lookups, and the simulator
+calls `MinMaxChange(0, val)` regardless of which slider you moved.
+
+To fix this, after a script is successfully loaded into the simulator,
+`LuaRuntime::extractScriptConfig()` walks the resolved `Config` table
+*from Lua* — yielding real integer IDs. `MainWindow::
+fixupFormFromSimulator()` then merges these IDs back into the form's
+menu items. The form's display IDs are now authoritative, the
+simulator's `MinMaxChange` calls hit the right branches, and the LCD
+preview's live overrides match the right rows.
 
 ### `zc.*` stubs
 
@@ -873,7 +950,11 @@ The setting is remembered in `QSettings` between sessions.
 
 ### New from wizard…
 
-`File → New from wizard…` (`Ctrl+Shift+N`) opens a 6-step dialog:
+`File → New from wizard…` (`Ctrl+Shift+N`) opens a 6-step dialog with a
+**two-column layout**: controls on the left, contextual help on the
+right. The right column updates live as you change selections.
+
+#### Pages
 
 1. **Pattern type** — Pulse (recommended), Constant, Fade in/out, Burst,
    TENS-like.
@@ -883,6 +964,28 @@ The setting is remembered in `QSettings` between sessions.
 4. **Channels** — pick which of CH1..CH4 the pattern drives.
 5. **Kill-switch** — checkbox to add a `STOP` soft button (recommended).
 6. **Review** — read-only summary before generating.
+
+#### The contextual side panel
+
+Each page's right column has up to four sections that update as you
+move sliders or toggle radios:
+
+- 🎯 **What it does** — the technical effect of the selected option,
+  in one or two sentences.
+- 🎨 **Feeling** — the typical *sensation* in plain language. "Fine
+  tingling" for TENS-like, "rapid-fire double-tap-tap-tap" for Burst,
+  "very rapid" for 1 s cycles, etc.
+- 💡 **Recommendation** — for who / when this option is appropriate.
+  Always points beginners toward the safest choice.
+- ⚠️ **Warning** — appears only when the current selection has a
+  meaningful safety implication: Strong intensity + Burst, 4 channels
+  at once, kill-switch disabled, etc.
+
+The recommendations are conservative by default. The wizard pushes
+beginners toward Pulse / Gentle / 5 s / 1 channel / kill-switch ON
+because that's the safest configuration to learn the device.
+
+#### What gets generated
 
 Pressing **Generate** produces:
 
@@ -1194,6 +1297,18 @@ representation)`** — fixed. The simulator now truncates float arguments
 the same way the device firmware does. Make sure you've rebuilt after
 pulling recent commits.
 
+**After a Reset, the second Run looks frozen / channels stuck ON.** —
+fixed. Reset now reloads the cached source into a fresh `lua_State`,
+so every script global goes back to its initial value. If you still
+see this, you're on an older build — pull and rebuild.
+
+**The same value appears for every slider in the LCD preview.** —
+fixed. Caused by the regex parser failing to read identifier-based
+menu IDs (`id = MenuId.FREQ`), so they all shared `id = 0`. Now the
+simulator extracts the real integer IDs from Lua and patches them
+back into the form. Any script loaded from disk or from the bundled
+official presets benefits automatically.
+
 ---
 
 ## 22. Known limitations
@@ -1259,6 +1374,17 @@ pulling recent commits.
 - **Autosave / draft** — the 30-second editor backup written to
   `<temp>/zc95-lua-builder/autosave-<pid>.lua`. Recovered on next
   launch if the previous session crashed.
+- **`extractScriptConfig`** — the LuaRuntime method that walks the
+  resolved `Config` table after pcall, returning a `ScriptConfig` with
+  real integer menu IDs even when the source uses identifiers like
+  `MenuId.FREQ`. Used by MainWindow to patch the form after every load.
+- **Live mirror** — the mechanism by which moving a slider in the
+  Simulator's *Menu controls* section instantly updates the matching
+  bar in the LCD Preview. Implemented via a per-menu_id override map
+  in `LcdPreviewPanel`.
+- **Reset reload** — the simulator's Reset button discards the
+  `lua_State` and re-loads from a cached source so a 2nd Run starts
+  from a genuinely fresh state.
 
 ---
 
