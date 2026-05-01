@@ -40,6 +40,18 @@ private:
     void updateNav();
     void produceResult();
 
+    // Per-page info-panel refresh slots — re-renders the right-hand
+    // help column when the user changes a control on the left.
+    void updateTypeInfo();
+    void updateIntensityInfo();
+    void updateCycleInfo();
+    void updateChannelsInfo();
+    void updateKillSwitchInfo();
+
+    // Helper that wraps a QWidget (left controls) and a QLabel (right
+    // info panel) into a single horizontal page widget.
+    class QWidget* buildSplitPage(QWidget* leftControls, QLabel*& outInfo);
+
     QStackedWidget* m_stack = nullptr;
     QPushButton*    m_prevBtn = nullptr;
     QPushButton*    m_nextBtn = nullptr;
@@ -65,6 +77,13 @@ private:
 
     // Page 6 — summary (read-only preview)
     QLabel* m_summaryLabel = nullptr;
+
+    // Per-page info panels (right-hand column).
+    QLabel* m_typeInfo       = nullptr;
+    QLabel* m_intensityInfo  = nullptr;
+    QLabel* m_cycleInfo      = nullptr;
+    QLabel* m_channelsInfo   = nullptr;
+    QLabel* m_killSwitchInfo = nullptr;
 
     // Output
     ScriptConfig m_result;

@@ -534,13 +534,14 @@ void TestRoundtrip::officialScriptsResolveConfig() {
     QVERIFY2(rt.extractScriptConfig(resolved, &warn),
              qPrintable(QString("could not extract Config from %1: %2").arg(name, warn)));
 
-    // Every official script defines a non-empty name and at least one menu item.
+    // Every official script defines a non-empty name.
     QVERIFY(!resolved.name.isEmpty());
-    QVERIFY(!resolved.menuItems.isEmpty());
 
-    // Every menu item should have a unique non-zero ID once resolved
-    // through Lua (regression test for the regex parser bug that left
-    // every id at 0 because they were expressed as MenuId.X).
+    // Some scripts (random2, torment) are intentionally parameter-less —
+    // they have no menu_items, just a fixed pattern. Don't fail those, but
+    // do verify any menu items present have unique non-zero IDs (regression
+    // test for the regex parser bug that left every id at 0 because they
+    // were expressed as MenuId.X identifiers).
     QSet<int> ids;
     for (const auto& mi : resolved.menuItems) {
         QVERIFY2(mi.id > 0,

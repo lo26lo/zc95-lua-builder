@@ -122,6 +122,7 @@ bool SimulatorPanel::loadSource(const QString& source) {
         m_loaded = false;
         return false;
     }
+    m_currentSource = source;
     m_loaded = true;
     m_setupCalled = false;
     m_allEvents.clear();
@@ -141,6 +142,7 @@ bool SimulatorPanel::loadSourceSilent(const QString& source) {
         m_loaded = false;
         return false;
     }
+    m_currentSource = source;
     m_loaded = true;
     m_setupCalled = false;
     m_allEvents.clear();
@@ -179,12 +181,27 @@ void SimulatorPanel::pause() {
 
 void SimulatorPanel::reset() {
     pause();
+    // Re-load the script from cache so the lua_State is genuinely fresh:
+    // every global (e.g. _burst_next_burst_ms in tens.lua) goes back to
+    // its initial value, channel state defaults are restored, etc.
+    // Without this, a 2nd Run after a Reset inherits the end-of-Run-1
+    // globals, which often makes the pattern misbehave (channels stuck ON,
+    // schedulers waiting on stale timestamps, …).
+    if (!m_currentSource.isEmpty()) {
+        QString err;
+        if (!m_runtime->loadScript(m_currentSource, &err)) {
+            appendLogs("[ERROR] Reset reload failed: " + err);
+            m_loaded = false;
+        } else {
+            m_loaded = true;
+        }
+    }
     m_setupCalled = false;
     m_allEvents.clear();
     m_runtime->setCurrentTimeMs(0);
     m_timeline->clear();
     m_clock->setText("t = 0.000s");
-    appendLogs("[INFO] Reset.");
+    appendLogs("[INFO] Reset (script reloaded — fresh state).");
     refreshState();
 }
 

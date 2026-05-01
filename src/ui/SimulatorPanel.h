@@ -91,6 +91,7 @@ private:
     bool m_loaded = false;
     bool m_setupCalled = false;
     QVector<ChannelEvent> m_allEvents;
+    QString m_currentSource;     // cached so reset() can re-init the lua_State
 
     // Live menu controls (sliders for MIN_MAX, combos for MULTI_CHOICE).
     QGroupBox* m_menuGroup = nullptr;

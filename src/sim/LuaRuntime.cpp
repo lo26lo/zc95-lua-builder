@@ -352,7 +352,14 @@ bool LuaRuntime::callRequired(const char* name, int nargs, int nresults, QString
 }
 
 bool LuaRuntime::callSetup(QString* error) {
-    return callOptional("Setup", 0, 0, error);
+    // The official trifade.lua script declares `function Setup(time_ms)`
+    // and uses the parameter to seed `_step_start_time_ms = time_ms`. If
+    // we call Setup with no args, time_ms is nil and the next Loop call
+    // crashes on `time_ms - _step_start_time_ms`. Lua silently ignores
+    // extra args for scripts that declare `function Setup()` without a
+    // parameter, so passing 0 is safe for everyone.
+    lua_pushnumber(L, m_currentTimeMs);
+    return callOptional("Setup", 1, 0, error);
 }
 
 bool LuaRuntime::callLoop(double time_ms, QString* error) {

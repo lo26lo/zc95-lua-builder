@@ -10,10 +10,33 @@
 #include <QSpinBox>
 #include <QCheckBox>
 #include <QGroupBox>
+#include <QFrame>
+
+// Common HTML stylesheet for info panels.
+static const char* kInfoStyle =
+    "QLabel {"
+    "  background: #1e2630;"
+    "  color: #e0e6ed;"
+    "  border: 1px solid #2d3a4a;"
+    "  border-radius: 4px;"
+    "  padding: 14px;"
+    "  font-size: 10pt;"
+    "}";
+
+// Standard section header used inside info panels.
+static QString infoSection(const QString& emoji, const QString& title, const QString& body) {
+    return QString("<p style='margin: 0 0 4px 0;'><b style='color:#9bd1ff;'>%1 %2</b></p>"
+                   "<p style='margin: 0 0 12px 0; color:#cbd5e0;'>%3</p>")
+        .arg(emoji, title, body);
+}
+static QString infoWarning(const QString& body) {
+    return QString("<p style='margin: 0 0 4px 0;'><b style='color:#ffb86b;'>⚠ Warning</b></p>"
+                   "<p style='margin: 0 0 12px 0; color:#f5d8a8;'>%1</p>").arg(body);
+}
 
 WizardDialog::WizardDialog(QWidget* parent) : QDialog(parent) {
     setWindowTitle("New pattern wizard");
-    resize(620, 520);
+    resize(980, 620);
 
     auto* outer = new QVBoxLayout(this);
 
@@ -52,23 +75,43 @@ WizardDialog::WizardDialog(QWidget* parent) : QDialog(parent) {
     updateNav();
 }
 
-void WizardDialog::buildTypePage() {
+QWidget* WizardDialog::buildSplitPage(QWidget* leftControls, QLabel*& outInfo) {
     auto* page = new QWidget(m_stack);
-    auto* lay = new QVBoxLayout(page);
+    auto* h = new QHBoxLayout(page);
+    h->setContentsMargins(0, 0, 0, 0);
+    h->setSpacing(12);
+
+    h->addWidget(leftControls, 55);
+
+    outInfo = new QLabel(page);
+    outInfo->setWordWrap(true);
+    outInfo->setTextFormat(Qt::RichText);
+    outInfo->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+    outInfo->setStyleSheet(kInfoStyle);
+    outInfo->setMinimumWidth(280);
+    h->addWidget(outInfo, 45);
+
+    return page;
+}
+
+void WizardDialog::buildTypePage() {
+    auto* left = new QWidget(m_stack);
+    auto* lay = new QVBoxLayout(left);
+    lay->setContentsMargins(0, 0, 0, 0);
     lay->addWidget(new QLabel(
         "<p>What kind of pattern do you want?</p>"
         "<p style='color:#888;'>Each option generates a starting script "
-        "you can refine later. You can always come back and pick another.</p>", page));
+        "you can refine later. You can always come back and pick another.</p>", left));
 
-    m_typeGroup = new QButtonGroup(page);
+    m_typeGroup = new QButtonGroup(left);
 
     auto add = [&](Type t, const QString& title, const QString& desc, bool checked = false) {
-        auto* rb = new QRadioButton(title, page);
+        auto* rb = new QRadioButton(title, left);
         rb->setStyleSheet("font-weight: bold;");
         rb->setChecked(checked);
         m_typeGroup->addButton(rb, t);
         lay->addWidget(rb);
-        auto* d = new QLabel(desc, page);
+        auto* d = new QLabel(desc, left);
         d->setWordWrap(true);
         d->setStyleSheet("color:#aaa; padding-left: 22px; padding-bottom: 8px;");
         lay->addWidget(d);
@@ -90,27 +133,102 @@ void WizardDialog::buildTypePage() {
         "than thumping.");
 
     lay->addStretch();
-    m_stack->addWidget(page);
+
+    connect(m_typeGroup, &QButtonGroup::idToggled,
+            this, [this](int, bool) { updateTypeInfo(); });
+
+    m_stack->addWidget(buildSplitPage(left, m_typeInfo));
+    updateTypeInfo();
+}
+
+void WizardDialog::updateTypeInfo() {
+    Type t = (m_typeGroup && m_typeGroup->checkedId() >= 0)
+                 ? Type(m_typeGroup->checkedId()) : TPulse;
+    QString html;
+    switch (t) {
+    case TPulse:
+        html += infoSection("🎯", "What it does",
+            "Fires short on/off pulses at a regular interval (controlled by "
+            "the <i>Speed</i> slider in the generated script).");
+        html += infoSection("🎨", "Feeling",
+            "Rhythmic taps. Each pulse is brief — you feel a pop, then nothing, "
+            "then another pop. Speed slider controls how fast.");
+        html += infoSection("💡", "Recommendation",
+            "Best starting choice for newcomers. Easy to dial in: turn the "
+            "front-panel knob slowly until you feel it, then adjust speed.");
+        break;
+    case TConstant:
+        html += infoSection("🎯", "What it does",
+            "Drives every selected channel ON continuously at a fixed "
+            "frequency and pulse width. Once it's on, it stays on.");
+        html += infoSection("🎨", "Feeling",
+            "Steady vibration / buzz. Like a basic TENS unit at a clinic.");
+        html += infoSection("💡", "Recommendation",
+            "Pick this if you want maximum simplicity and predictability. "
+            "Good for muscle stimulation or extended low-intensity sessions.");
+        html += infoWarning(
+            "Constant output at high power can cause electrode-site fatigue "
+            "(skin irritation). Take breaks every 20-30 minutes.");
+        break;
+    case TFade:
+        html += infoSection("🎯", "What it does",
+            "Smoothly ramps power up to maximum and back down to zero over "
+            "one cycle, using a sine wave. Repeats indefinitely.");
+        html += infoSection("🎨", "Feeling",
+            "A wave that builds, peaks, and recedes. Very gentle entry and "
+            "exit — you barely notice it starting.");
+        html += infoSection("💡", "Recommendation",
+            "Excellent for warm-up sessions or for users who don't like "
+            "sudden onsets. Set cycle duration to 10-30 s for slow fades.");
+        break;
+    case TBurst:
+        html += infoSection("🎯", "What it does",
+            "Groups of 4 quick pulses on every channel, then a pause, then "
+            "another group. Period controlled by the <i>Speed</i> slider.");
+        html += infoSection("🎨", "Feeling",
+            "Rapid-fire double-tap-tap-tap, then silence, repeat. More "
+            "intense than a single Pulse — your nerves perceive the group.");
+        html += infoSection("💡", "Recommendation",
+            "Skip on first session. Try Pulse first to learn what intensity "
+            "you tolerate, then graduate to Burst.");
+        html += infoWarning(
+            "Burst patterns concentrate charge in a short window and can "
+            "feel surprisingly strong. Always start the dial at zero.");
+        break;
+    case TTens:
+        html += infoSection("🎯", "What it does",
+            "High-frequency continuous output (150 Hz) with narrow pulse "
+            "width (80 µs) — the classic TENS-style waveform.");
+        html += infoSection("🎨", "Feeling",
+            "A fine tingling, almost prickling sensation. Less thumpy than "
+            "low-frequency patterns; more about surface stimulation.");
+        html += infoSection("💡", "Recommendation",
+            "Good for users who find low-frequency rumble uncomfortable, "
+            "or for muscle relaxation / nerve stimulation contexts.");
+        break;
+    }
+    m_typeInfo->setText(html);
 }
 
 void WizardDialog::buildIntensityPage() {
-    auto* page = new QWidget(m_stack);
-    auto* lay = new QVBoxLayout(page);
+    auto* left = new QWidget(m_stack);
+    auto* lay = new QVBoxLayout(left);
+    lay->setContentsMargins(0, 0, 0, 0);
     lay->addWidget(new QLabel(
         "<p>Maximum intensity ceiling for this pattern</p>"
         "<p style='color:#888;'>Sets the <b>cap</b>. The actual output is "
         "still scaled by the front-panel dial. Picking <b>Gentle</b> means "
-        "even at the dial's maximum the pattern stays mild.</p>", page));
+        "even at the dial's maximum the pattern stays mild.</p>", left));
 
-    m_intGroup = new QButtonGroup(page);
+    m_intGroup = new QButtonGroup(left);
 
     auto add = [&](Intensity i, const QString& title, const QString& desc, bool checked = false) {
-        auto* rb = new QRadioButton(title, page);
+        auto* rb = new QRadioButton(title, left);
         rb->setStyleSheet("font-weight: bold;");
         rb->setChecked(checked);
         m_intGroup->addButton(rb, i);
         lay->addWidget(rb);
-        auto* d = new QLabel(desc, page);
+        auto* d = new QLabel(desc, left);
         d->setWordWrap(true);
         d->setStyleSheet("color:#aaa; padding-left: 22px; padding-bottom: 8px;");
         lay->addWidget(d);
@@ -125,21 +243,75 @@ void WizardDialog::buildIntensityPage() {
         "doing AND you'll start the session with the dial at zero.");
 
     lay->addStretch();
-    m_stack->addWidget(page);
+
+    connect(m_intGroup, &QButtonGroup::idToggled,
+            this, [this](int, bool) { updateIntensityInfo(); });
+
+    m_stack->addWidget(buildSplitPage(left, m_intensityInfo));
+    updateIntensityInfo();
+}
+
+void WizardDialog::updateIntensityInfo() {
+    Intensity i = (m_intGroup && m_intGroup->checkedId() >= 0)
+                      ? Intensity(m_intGroup->checkedId()) : IGentle;
+    QString html;
+    switch (i) {
+    case IGentle:
+        html += infoSection("🎯", "What it does",
+            "Caps the script's <code>SetPower</code> at 400/1000. Even with "
+            "the front-panel dial maxed, the output stays moderate.");
+        html += infoSection("🎨", "Feeling",
+            "Pleasant buzz, never overwhelming. You feel it clearly but "
+            "always in control.");
+        html += infoSection("💡", "Recommendation",
+            "<b>Always pick this for your first session.</b> You can change "
+            "it later — but a gentle ceiling means you can't hurt yourself "
+            "by accidentally cranking the dial.");
+        break;
+    case IMedium:
+        html += infoSection("🎯", "What it does",
+            "Caps power at 700/1000. About 70% of the device's electrical "
+            "output capability.");
+        html += infoSection("🎨", "Feeling",
+            "Noticeable but comfortable. Most experienced users settle here "
+            "for their day-to-day patterns.");
+        html += infoSection("💡", "Recommendation",
+            "Pick this once you know your tolerance from at least 2-3 "
+            "Gentle sessions. Good general-purpose ceiling.");
+        break;
+    case IStrong:
+        html += infoSection("🎯", "What it does",
+            "No software cap — full 1000/1000 available. The front-panel "
+            "dial is your ONLY moderation.");
+        html += infoSection("🎨", "Feeling",
+            "Strong sensations possible. Some pattern types (Burst, narrow "
+            "pulse widths) at full power can be uncomfortable.");
+        html += infoSection("💡", "Recommendation",
+            "Only pick this if you've used the device for a while AND you "
+            "always start the dial at zero. Best paired with a Gentle "
+            "<i>Speed</i> setting on Burst patterns.");
+        html += infoWarning(
+            "Combining Strong intensity + Burst type + narrow pulse width "
+            "(&lt; 100 µs) creates the most intense ZC95 outputs. Slow "
+            "ramp-up is essential.");
+        break;
+    }
+    m_intensityInfo->setText(html);
 }
 
 void WizardDialog::buildCyclePage() {
-    auto* page = new QWidget(m_stack);
-    auto* lay = new QVBoxLayout(page);
+    auto* left = new QWidget(m_stack);
+    auto* lay = new QVBoxLayout(left);
+    lay->setContentsMargins(0, 0, 0, 0);
     lay->addWidget(new QLabel(
         "<p>How long should one cycle of the pattern last?</p>"
         "<p style='color:#888;'>For a Fade: time from low to high to low again.<br>"
         "For a Burst: time between burst groups.<br>"
-        "For a Pulse: time between individual pulses.</p>", page));
+        "For a Pulse: time between individual pulses.</p>", left));
 
     auto* h = new QHBoxLayout();
-    h->addWidget(new QLabel("Cycle duration (seconds):", page));
-    m_cycleSec = new QSpinBox(page);
+    h->addWidget(new QLabel("Cycle duration (seconds):", left));
+    m_cycleSec = new QSpinBox(left);
     m_cycleSec->setRange(1, 60);
     m_cycleSec->setValue(5);
     m_cycleSec->setSingleStep(1);
@@ -152,27 +324,64 @@ void WizardDialog::buildCyclePage() {
         "<p style='color:#aaa;'>Typical values:<br>"
         "&nbsp;&nbsp;1-3 s — fast, energetic<br>"
         "&nbsp;&nbsp;5-10 s — comfortable, what most patterns use<br>"
-        "&nbsp;&nbsp;20-60 s — slow build-up</p>", page);
+        "&nbsp;&nbsp;20-60 s — slow build-up</p>", left);
     hint->setWordWrap(true);
     lay->addWidget(hint);
 
     lay->addStretch();
-    m_stack->addWidget(page);
+
+    connect(m_cycleSec, qOverload<int>(&QSpinBox::valueChanged),
+            this, [this](int) { updateCycleInfo(); });
+
+    m_stack->addWidget(buildSplitPage(left, m_cycleInfo));
+    updateCycleInfo();
+}
+
+void WizardDialog::updateCycleInfo() {
+    int s = m_cycleSec ? m_cycleSec->value() : 5;
+    QString html;
+    QString feel, reco;
+    if (s <= 3) {
+        feel = QString("Very rapid. Pulses or fades happen %1 time(s) per second-ish.").arg(s == 1 ? "more than 1" : QString::number(s));
+        reco = "Energetic, sharp. Combined with Burst type this becomes very intense — better with Gentle intensity.";
+    } else if (s <= 10) {
+        feel = "Comfortable rhythm. You can clearly perceive each cycle but it's not exhausting.";
+        reco = "Sweet spot for most patterns. <b>Recommended for beginners.</b>";
+    } else if (s <= 30) {
+        feel = "Slow build-up. Each fade or burst feels deliberate, almost meditative.";
+        reco = "Excellent for warm-up sessions or for users who like a long, gradual approach.";
+    } else {
+        feel = "Very slow. A single cycle takes nearly a minute. Useful only for Fade.";
+        reco = "Niche choice — for extended Fade sessions where you want barely-perceptible changes.";
+    }
+    html += infoSection("⏱", "Currently",
+        QString("<b style='color:#ffd400;'>%1 second%2</b> per cycle.").arg(s).arg(s > 1 ? "s" : ""));
+    html += infoSection("🎨", "Feeling", feel);
+    html += infoSection("💡", "Recommendation", reco);
+    if (s == 1) {
+        html += infoWarning(
+            "1 second is the minimum and rather aggressive — combined with "
+            "high power it can feel jarring. Try 3-5 s instead unless you "
+            "specifically want a fast pattern.");
+    }
+    m_cycleInfo->setText(html);
 }
 
 void WizardDialog::buildChannelsPage() {
-    auto* page = new QWidget(m_stack);
-    auto* lay = new QVBoxLayout(page);
+    auto* left = new QWidget(m_stack);
+    auto* lay = new QVBoxLayout(left);
+    lay->setContentsMargins(0, 0, 0, 0);
     lay->addWidget(new QLabel(
         "<p>Which channels should the pattern drive?</p>"
         "<p style='color:#888;'>The ZC95 has 4 independent output channels. "
-        "Most beginners start with 1 or 2 channels.</p>", page));
+        "Most beginners start with 1 or 2 channels.</p>", left));
 
     auto* row = new QHBoxLayout();
     for (int i = 0; i < 4; ++i) {
-        m_chBoxes[i] = new QCheckBox(QString("CH%1").arg(i + 1), page);
+        m_chBoxes[i] = new QCheckBox(QString("CH%1").arg(i + 1), left);
         m_chBoxes[i]->setChecked(i < 1);  // CH1 by default
         m_chBoxes[i]->setStyleSheet("font-size: 12pt; padding: 8px;");
+        connect(m_chBoxes[i], &QCheckBox::toggled, this, [this](bool) { updateChannelsInfo(); });
         row->addWidget(m_chBoxes[i]);
     }
     row->addStretch();
@@ -180,37 +389,128 @@ void WizardDialog::buildChannelsPage() {
 
     auto* hint = new QLabel(
         "<p style='color:#aaa;'>Tip: when in doubt, pick CH1 only. You can "
-        "always edit the script afterwards to add more channels.</p>", page);
+        "always edit the script afterwards to add more channels.</p>", left);
     hint->setWordWrap(true);
     lay->addWidget(hint);
 
     lay->addStretch();
-    m_stack->addWidget(page);
+    m_stack->addWidget(buildSplitPage(left, m_channelsInfo));
+    updateChannelsInfo();
+}
+
+void WizardDialog::updateChannelsInfo() {
+    int count = 0;
+    QStringList names;
+    for (int i = 0; i < 4; ++i) {
+        if (m_chBoxes[i] && m_chBoxes[i]->isChecked()) {
+            ++count;
+            names << QString("CH%1").arg(i + 1);
+        }
+    }
+    QString html;
+    html += infoSection("🎯", "Currently",
+        count == 0
+            ? "<i style='color:#ffb86b;'>No channel selected — at least one is required.</i>"
+            : QString("<b style='color:#ffd400;'>%1 channel%2:</b> %3")
+                  .arg(count).arg(count > 1 ? "s" : "").arg(names.join(", ")));
+
+    if (count == 0) {
+        html += infoSection("💡", "Recommendation",
+            "Select at least CH1. The wizard will default to CH1 if you "
+            "leave them all unchecked.");
+    } else if (count == 1) {
+        html += infoSection("🎨", "Feeling",
+            "A single channel drives one electrode pair. Sensation localised "
+            "to that area only.");
+        html += infoSection("💡", "Recommendation",
+            "<b>Best starting choice.</b> One channel = one variable to "
+            "understand. Pair it with two electrodes placed close together "
+            "(2-5 cm apart) for a focused sensation.");
+    } else if (count == 2) {
+        html += infoSection("🎨", "Feeling",
+            "Two independent channels. With four electrodes you can stimulate "
+            "two distinct areas simultaneously.");
+        html += infoSection("💡", "Recommendation",
+            "Common for paired placements (left/right, or two body zones). "
+            "The pattern fires identical events on both — they don't "
+            "alternate unless you edit the script.");
+    } else if (count == 3) {
+        html += infoSection("🎨", "Feeling",
+            "Three channels. Larger total surface area engaged simultaneously.");
+        html += infoSection("💡", "Recommendation",
+            "Uncommon — most setups use 1, 2, or 4. Consider whether you "
+            "really need 3, or whether 2 or 4 would be cleaner.");
+    } else {
+        html += infoSection("🎨", "Feeling",
+            "All 4 channels active. Maximum surface area engaged.");
+        html += infoSection("💡", "Recommendation",
+            "Useful for whole-body or multi-zone setups. Make sure each "
+            "channel has its own electrode pair — sharing an electrode "
+            "between channels is electrically unsound.");
+        html += infoWarning(
+            "Driving 4 channels simultaneously at high power can be more "
+            "intense than expected — total charge delivered scales with "
+            "channel count. Start the dial low.");
+    }
+    m_channelsInfo->setText(html);
 }
 
 void WizardDialog::buildKillSwitchPage() {
-    auto* page = new QWidget(m_stack);
-    auto* lay = new QVBoxLayout(page);
+    auto* left = new QWidget(m_stack);
+    auto* lay = new QVBoxLayout(left);
+    lay->setContentsMargins(0, 0, 0, 0);
     lay->addWidget(new QLabel(
         "<p>Add a kill-switch?</p>"
         "<p style='color:#888;'>A soft button on the device LCD lets you "
         "stop the output instantly with one tap. <b>Highly recommended</b> "
-        "— always have a way to abort.</p>", page));
+        "— always have a way to abort.</p>", left));
 
-    m_killSwitch = new QCheckBox("Yes, add a STOP soft button", page);
+    m_killSwitch = new QCheckBox("Yes, add a STOP soft button", left);
     m_killSwitch->setChecked(true);
     m_killSwitch->setStyleSheet("font-size: 12pt; padding: 8px;");
     lay->addWidget(m_killSwitch);
+    connect(m_killSwitch, &QCheckBox::toggled, this, [this](bool) { updateKillSwitchInfo(); });
 
     auto* hint = new QLabel(
         "<p style='color:#aaa;'>The front-panel dial is always available "
         "as a hardware kill-switch (turn it to zero). The soft button is "
-        "an additional one-tap alternative.</p>", page);
+        "an additional one-tap alternative.</p>", left);
     hint->setWordWrap(true);
     lay->addWidget(hint);
 
     lay->addStretch();
-    m_stack->addWidget(page);
+    m_stack->addWidget(buildSplitPage(left, m_killSwitchInfo));
+    updateKillSwitchInfo();
+}
+
+void WizardDialog::updateKillSwitchInfo() {
+    bool on = m_killSwitch && m_killSwitch->isChecked();
+    QString html;
+    if (on) {
+        html += infoSection("🎯", "What it does",
+            "Generates a <code>SoftButton(pushed)</code> Lua callback that, "
+            "on press, calls <code>zc.ChannelOff(1..4)</code> and resets "
+            "<code>_intensity = 0</code>.");
+        html += infoSection("🎨", "How it feels",
+            "One tap on the on-screen STOP button = output stops "
+            "immediately. The button label appears in the LCD's top-left.");
+        html += infoSection("💡", "Recommendation",
+            "<b>Keep this enabled.</b> Two independent ways to stop output "
+            "(soft button + hardware dial) is the gold standard. Costs you "
+            "nothing.");
+    } else {
+        html += infoSection("🎯", "What it does",
+            "Skips the soft-button generation. The pattern can only be "
+            "stopped by turning the front-panel dial to zero.");
+        html += infoWarning(
+            "<b>Not recommended.</b> If for any reason the dial is "
+            "out of reach or you panic, you have NO software override. "
+            "The dial is your only kill mechanism.");
+        html += infoSection("💡", "Recommendation",
+            "Re-enable the soft button. Even if you never use it, having "
+            "it cost nothing and may save the day.");
+    }
+    m_killSwitchInfo->setText(html);
 }
 
 void WizardDialog::buildSummaryPage() {
