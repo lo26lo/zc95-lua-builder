@@ -270,6 +270,31 @@ void SimulatorPanel::appendLogs(const QString& s) {
     emit log(s);
 }
 
+void SimulatorPanel::clearTimelineKeepingState() {
+    m_allEvents.clear();
+    // Re-seed: any channel that is currently ON gets a ChannelOn event
+    // stamped at the current simulated time, so its segment is drawn
+    // from t=now forward instead of disappearing entirely (matters for
+    // Constant patterns that turn channels ON once at Setup and never
+    // emit another event afterwards).
+    if (m_runtime) {
+        const auto& st = m_runtime->state();
+        double t = m_runtime->currentTimeMs();
+        for (int i = 0; i < 4; ++i) {
+            if (st.channels[i].on) {
+                ChannelEvent e;
+                e.timeMs = t;
+                e.type = ChannelEventType::ChannelOn;
+                e.channel = i + 1;
+                m_allEvents.push_back(e);
+            }
+        }
+        m_timeline->setEvents(m_allEvents, t);
+    } else {
+        m_timeline->clear();
+    }
+}
+
 void SimulatorPanel::refreshState() {
     const auto& s = m_runtime->state();
     for (int i = 0; i < 4; ++i) {
@@ -425,6 +450,10 @@ void SimulatorPanel::setMenuItems(const QVector<MenuItem>& items) {
                 valLabel->setText(QString::number(v));
                 emit liveMenuValueChanged(menuId, v);   // mirror on LCD preview
                 if (!m_loaded) return;
+                // Auto-clear the timeline so the user only sees activity
+                // produced by the new parameter value, not stale events
+                // from before the slider moved.
+                clearTimelineKeepingState();
                 QString err;
                 if (!m_runtime->callMinMaxChange(menuId, v, &err)) {
                     appendLogs(QString("[ERROR] MinMaxChange(%1,%2): %3").arg(menuId).arg(v).arg(err));
@@ -462,6 +491,7 @@ void SimulatorPanel::setMenuItems(const QVector<MenuItem>& items) {
                     int cid = combo->currentData().toInt();
                     emit liveMenuValueChanged(menuId, cid);
                     if (!m_loaded) return;
+                    clearTimelineKeepingState();
                     QString err;
                     if (!m_runtime->callMultiChoiceChange(menuId, cid, &err)) {
                         appendLogs(QString("[ERROR] MultiChoiceChange(%1,%2): %3").arg(menuId).arg(cid).arg(err));

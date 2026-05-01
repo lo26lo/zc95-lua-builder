@@ -60,7 +60,9 @@ tweak it, and replay it.
   API is stubbed and emits events that drive a 4-lane timeline. **Live
   sliders / combos** in the simulator drive `MinMaxChange` and
   `MultiChoiceChange` in real time so you can test the script
-  interactively without flashing.
+  interactively without flashing. The timeline auto-clears on every
+  parameter change so you only see the result of the *current*
+  settings.
 - **Lua 5.1 compat** — `module(…)`, `package.seeall` and `require("ettot")`
   all work in the simulator. Float arguments to `zc.SetFrequency` /
   `SetPower` / etc. are tolerated (truncated, matching device behavior).

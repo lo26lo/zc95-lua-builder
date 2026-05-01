@@ -71,6 +71,11 @@ private slots:
 private:
     void appendLogs(const QString& s);
     void refreshState();
+    // Wipe the timeline event history but keep the lua_State and the
+    // simulated clock running. Called whenever the user moves a live
+    // slider / combo so the displayed channel activity reflects only
+    // the current parameter values.
+    void clearTimelineKeepingState();
 
     LuaRuntime* m_runtime;
     TimelineWidget* m_timeline;

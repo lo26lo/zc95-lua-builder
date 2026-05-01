@@ -380,6 +380,21 @@ LCD preview's `paintEvent` reads the override if present, otherwise
 falls back to the form's `default` value. Loading a different script
 clears all overrides.
 
+#### Auto-clear on parameter change
+
+Whenever you move a slider or change a combo in the simulator's
+*Menu controls* section, the timeline event history is **wiped** and
+re-seeded with the current channel state. This way the next pulses
+that appear reflect *only* the new parameter values — you're not
+visually confused by "old" pulses from before the change.
+
+The simulator clock keeps running and the `lua_State` is untouched —
+only the visual event buffer is reset. For a Pulse pattern, you'll
+see the rate change immediately and cleanly. For a Constant pattern,
+the channel-ON segment continues uninterrupted because the re-seed
+synthesises a `ChannelOn` event at `t = now` for any channel that's
+currently on.
+
 ---
 
 ## 6. Editor reference (right pane)
