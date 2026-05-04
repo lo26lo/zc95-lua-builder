@@ -98,6 +98,10 @@ private:
     QVector<ChannelEvent> m_allEvents;
     QString m_currentSource;     // cached so reset() can re-init the lua_State
 
+    // Variable inspector — refreshed every tick from m_runtime->inspectGlobals().
+    class QTableWidget* m_globalsTable = nullptr;
+    void refreshGlobals();
+
     // Live menu controls (sliders for MIN_MAX, combos for MULTI_CHOICE).
     QGroupBox* m_menuGroup = nullptr;
     QVBoxLayout* m_menuLayout = nullptr;

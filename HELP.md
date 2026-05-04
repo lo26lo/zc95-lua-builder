@@ -39,16 +39,18 @@ screen confuses you, this document is the place to look.
 11. [The embedded Lua simulator in detail](#11-the-embedded-lua-simulator-in-detail)
 12. [Bundled official scripts](#12-bundled-official-scripts)
 13. [Beginner mode and the new-pattern wizard](#13-beginner-mode-and-the-new-pattern-wizard)
-14. [Pre-flight check](#14-pre-flight-check)
-15. [Explain this script](#15-explain-this-script)
-16. [▶ Test buttons on menu items](#16--test-buttons-on-menu-items)
-17. [Auto-save and draft recovery](#17-auto-save-and-draft-recovery)
-18. [Keyboard shortcuts](#18-keyboard-shortcuts)
-19. [Settings, recent files, and persistence](#19-settings-recent-files-and-persistence)
-20. [Portable Windows build](#20-portable-windows-build)
-21. [Troubleshooting / FAQ](#21-troubleshooting--faq)
-22. [Known limitations](#22-known-limitations)
-23. [Glossary](#23-glossary)
+14. [Safety profile (locked caps)](#14-safety-profile-locked-caps)
+15. [Pre-flight check](#15-pre-flight-check)
+16. [Explain this script](#16-explain-this-script)
+17. [Timeline editor](#17-timeline-editor)
+18. [▶ Test buttons on menu items](#18--test-buttons-on-menu-items)
+19. [Auto-save and draft recovery](#19-auto-save-and-draft-recovery)
+20. [Keyboard shortcuts](#20-keyboard-shortcuts)
+21. [Settings, recent files, and persistence](#21-settings-recent-files-and-persistence)
+22. [Portable Windows build](#22-portable-windows-build)
+23. [Troubleshooting / FAQ](#23-troubleshooting--faq)
+24. [Known limitations](#24-known-limitations)
+25. [Glossary](#25-glossary)
 
 ---
 
@@ -152,7 +154,7 @@ and distribute.
 | New | Open | Save | Regen (Ctrl+G) | Reparse (Ctrl+Shift+G)               |  Toolbar
 +--------------+------------------------------+---------------------------+-+
 |              |                              |                           |
-| [Config]     |  [Editor] [Simulator]        |                           |
+| [Config]     |  [Editor] [Simulator] [TL Beta] |                        |
 | [Menu Items] |                              |                           |
 | [Functions]  |  pattern.lua                 |                           |
 | [Snippets]   |                              |                           |
@@ -160,7 +162,7 @@ and distribute.
 | [LCD Prev.]  |                              |                           |
 |              |                              |                           |
 | (left tabs)  | (editor + find bar OR full   |                           |
-|              |  simulator UI)               |                           |
+|              |  simulator OR timeline beta) |                           |
 |              |                              |                           |
 +--------------+------------------------------+---------------------------+
 | Issues  ⚠ L42  zc.SetPower power 2000 out of range (0-1000)              |  Dock (toggle in View)
@@ -549,6 +551,12 @@ If the script doesn't react when you move the slider, you've probably:
   edges for cursors.
 - **Orange segments** = `ChannelPulseMs` events with their declared
   duration.
+- **Bar height = power**: each segment's vertical thickness is
+  proportional to the channel's `power` at that moment (range 2 px at
+  `power=0` … 14 px at `power=1000`). A low-intensity sustained ON
+  looks like a thin stripe centered on the lane mid-line; full power
+  is a fat bar. SetPower events split segments at runtime so
+  changes mid-pattern are visible immediately.
 - **Yellow now-cursor**: a high-contrast vertical marker pinned to the
   rightmost (current) timestamp. Three layers — a 12 px translucent
   yellow halo, a 3 px solid yellow line, a 1 px white core — plus a
@@ -559,9 +567,35 @@ If the script doesn't react when you move the slider, you've probably:
 The timeline is a 5 s sliding window — once simulated time exceeds 5 s
 the window starts to scroll, and the cursor stays at the right edge.
 
+### Variables panel
+
+Right of the log, a 2-column table titled *Variables* shows every
+underscore-prefixed Lua global (the convention used by all official
+scripts to store user state). The table refreshes every Loop tick and
+also right after each MinMaxChange / MultiChoiceChange / SoftButton /
+ExternalTrigger.
+
+What you'll see:
+
+| Variable | Value |
+|---|---|
+| `_intensity` | `37` |
+| `_speed` | `5` |
+| `_burst_next_burst_ms` | `2400` |
+
+Numeric values are right-aligned. Strings are quoted. `nil`, `true`,
+`false`, tables (`table (3 entries)`) and functions are also
+recognised. The view is read-only — to change a variable, move the
+matching slider in *Menu controls* or write code in the editor and
+press Reset to reload.
+
+This is the easiest way to *see* how the script's internal state
+evolves without sprinkling `print()` calls. Particularly useful for
+beginners learning what `time_ms - _last_event` means.
+
 ### Log
 
-Below the timeline:
+Below the timeline (left half of the bottom panel):
 - `[INFO]` — internal events (Reset, script loaded, …).
 - `[OK]` — successful loads.
 - `[ERROR]` — Lua errors during `Setup()` or `Loop()`.
@@ -709,6 +743,71 @@ it.
 
 - The `Config = { … }` block, in full.
 - Stubs for newly-ticked callbacks (only if they don't already exist).
+
+### Where new stubs are inserted
+
+Smart-merge inserts new function stubs at their **canonical position**,
+not at the end of the file. The canonical order matches the firmware's
+expected layout:
+
+> `Setup`, `Loop`, `MinMaxChange`, `MultiChoiceChange`, `SoftButton`,
+> `ExternalTrigger`, `BluetoothRemoteKeypress`, `BluetoothHidEvent`,
+> `AudioIntensityChange`
+
+For each callback you've just ticked, smart-merge looks for the
+**earliest existing canonical successor** in your source and inserts
+the new stub just before it. If no later canonical callback is present,
+the stub is appended at the end.
+
+Example — your source has `Setup`, `Loop`, `SoftButton`. You tick
+`MinMaxChange` and `MultiChoiceChange`:
+
+- `MinMaxChange`: first existing successor = `SoftButton`. Inserted
+  just before it.
+- `MultiChoiceChange`: first existing successor = `SoftButton`.
+  Inserted just before it (and just after the new `MinMaxChange`,
+  because we process insertions in canonical-descending order).
+
+Result:
+
+```
+Config = { … }
+
+function Setup() … end
+function Loop(time_ms) … end
+function MinMaxChange(menu_id, val) … end       -- inserted
+function MultiChoiceChange(menu_id, choice_id) … end  -- inserted
+function SoftButton(pushed) … end
+```
+
+User-written helpers (e.g. `function MyHelper()`) are never moved.
+Stubs land in their canonical slot relative to the **firmware
+callbacks**; anything else stays exactly where you left it.
+
+### What can be removed (with confirmation)
+
+If you **uncheck** a callback in the Functions panel and that callback
+is still defined in the editor, `Ctrl+G` opens a confirmation dialog
+listing the orphaned function(s):
+
+> `Setup()` is present in the editor but you just unchecked it in the
+> Functions panel. Its body will be permanently deleted if you say Yes.
+> Choose No to keep it in place.
+> &nbsp;&nbsp;&nbsp;&nbsp;[Yes] [No] [Cancel]
+
+- **Yes** — the function (signature + body + trailing blank line) is
+  removed from the source.
+- **No** — the function stays as written; the form simply stops listing
+  it as ticked. You can re-tick it later without losing the body.
+- **Cancel** — the whole regenerate is aborted; the editor is unchanged.
+
+This preserves the smart-merge guarantee that **no code disappears
+without explicit user consent**.
+
+The function-block locator counts `function|if|for|while|repeat`
+openers and `end|until` closers — sufficient for every real-world
+script we've tested. Bare `do…end` blocks could theoretically confuse
+it, but they're rare and the diff dialog will show any discrepancy.
 
 ### Smart vs. dumb regenerate
 
@@ -1023,7 +1122,89 @@ starting point, not a finished pattern.
 
 ---
 
-## 14. Pre-flight check
+## 14. Safety profile (locked caps)
+
+A process-wide profile (configured via **View → Safety profile…**) sets
+hard caps on every numeric `zc.*` argument. The simulator clamps,
+the linter complains, and — if the profile is locked — the user can't
+change anything without the PIN.
+
+### What gets capped
+
+| Cap | Default (max) | Affects |
+|-----|---------------|---------|
+| Power            | 1000 | `zc.SetPower(*, value)` |
+| Frequency        | 300 Hz | `zc.SetFrequency(*, hz)` |
+| Pulse width      | 255 µs | `zc.SetPulseWidth(*, pos, neg)` (each phase) |
+| Pulse duration   | 10000 ms | `zc.ChannelPulseMs(*, ms)` |
+
+When the script tries to set a value above the cap, the simulator:
+1. Silently clamps the argument before applying it.
+2. Logs a `[SAFETY] SetPower(1, 1000) clamped to 500` line in the log.
+
+The linter scans the editor source for numeric literals exceeding the
+caps and:
+- emits a **Warning** if the profile is unlocked,
+- emits an **Error** if the profile is locked (the pre-flight check
+  refuses scripts that wouldn't run cleanly under the active caps).
+
+### Locking with a PIN
+
+Locking serves one purpose: stop someone borrowing your device from
+casually raising the caps. The PIN is hashed with SHA-256 + a static
+salt and stored in QSettings. The binary is publicly readable so this
+is **not** a security measure against a determined attacker — only
+against accidental tampering.
+
+To lock:
+1. Set caps to your preferred values.
+2. Tick **Lock with a PIN**.
+3. Enter the same PIN twice (4-16 characters).
+4. **OK**.
+
+While locked:
+- The View menu's Safety profile dialog requires the PIN before any
+  field can be edited.
+- The View → Beginner mode toggle is **forced ON** and read-only, so
+  advanced controls (triphase, BT HID, audio, …) stay hidden.
+- The status bar shows `🔒 Safety locked (max pwr=N · M Hz · K µs)`.
+- Linter warnings about exceeding caps become Errors → pre-flight
+  refuses the script.
+
+To unlock:
+1. **View → Safety profile…**
+2. Click **Unlock to edit…** → enter PIN.
+3. Untick **Lock with a PIN** → **OK**.
+
+Or just leave it locked and lower the offending values in the script.
+
+### Suggested starting profiles
+
+| Profile | Power | Freq | Width | Duration | Use case |
+|---|---|---|---|---|---|
+| First session | 400 | 200 | 180 | 500 | New user, learning their tolerance |
+| Casual | 700 | 250 | 200 | 1000 | Familiar user, daily patterns |
+| Unrestricted | 1000 | 300 | 255 | 10000 | Experienced, no caps |
+
+The status bar badge shows up whenever **any** cap is below the
+hardware maximum **or** the profile is locked, so you always know
+when caps are in play.
+
+### Limitations
+
+- Caps apply to **the simulator only**. Real-device behavior is
+  governed by the script you flash. Always lower values inside the
+  script before flashing — the safety profile won't follow it.
+- Caps don't apply to literal values in `Config = {…}` (e.g. a MIN_MAX
+  item with `max = 1000`). The user can still pick high values via
+  the slider; the simulator clamps the resulting `SetPower(*, val)`
+  call.
+- The PIN protects against tampering with the safety profile UI — it
+  doesn't prevent the user from editing the source script directly.
+
+---
+
+## 15. Pre-flight check
 
 `Generate → Pre-flight check` (`Ctrl+Shift+P`) is the recommended
 "is it ready?" step before you save / flash a script.
@@ -1054,7 +1235,7 @@ up gradually on real hardware regardless.
 
 ---
 
-## 15. Explain this script
+## 16. Explain this script
 
 `Help → Explain this script…` (`Ctrl+Shift+E`) opens a dialog with the
 current editor source rendered as a 3-column table:
@@ -1085,7 +1266,143 @@ script (e.g. one of the official presets).
 
 ---
 
-## 16. ▶ Test buttons on menu items
+## 17. Timeline editor
+
+The **Timeline (Beta)** tab on the right pane (next to **Editor** and
+**Simulator**) lets you build a pattern visually by placing events on a
+4-lane timeline, and round-trip with the Lua source via an embedded
+JSON sentinel.
+
+A yellow banner at the top of the tab reminds you that this feature is
+experimental — the round-trip is stable, but the API may still evolve.
+
+### Project toolbar (top row)
+
+| Control | Effect |
+|---|---|
+| **Loop** checkbox | When ON, generated `Loop()` wraps `time_ms` modulo the cycle. The pattern restarts automatically every cycle. |
+| **Cycle (ms)** | Length of one cycle. Used for the loop wrap and as the default viewport width. |
+| **← Read from Lua** | Re-read the timeline JSON sentinel from the current editor. Useful if you've manually edited the Lua and the timeline is stale. |
+| **→ Push to Lua** | Generate `Setup()` + `Loop()` from the current timeline and write them into the editor (replacing any previous timeline block). The sentinel comment is also updated. |
+| **Clear all** | Wipe every event (undoable with **Ctrl+Z**). |
+
+### Edit toolbar (second row)
+
+A tool palette + view controls. The currently active tool determines
+what happens when you click on an empty lane.
+
+| Control | Effect |
+|---|---|
+| **↖ Select** (`S`) | Click an event to select / drag-move. Click on empty lane = deselect. |
+| **▱ Pulse** (`P`) | Click-drag on empty lane = create a Pulse with that duration. |
+| **▶ On** (`O`) | Click on empty lane = drop a `ChannelOn` at that instant. |
+| **⏹ Off** (`F`) | Click on empty lane = drop a `ChannelOff` at that instant. |
+| **Snap** dropdown | Quantise create / move / nudge to `Off / 25 / 50 / 100 / 250 / 500 / 1000 ms`. Default **100 ms**. Hold **Shift** during a drag to bypass. |
+| **t = … ms** | Live time under the cursor (updated on hover and during drag). |
+| **↶ Undo** (`Ctrl+Z`) / **↷ Redo** (`Ctrl+Y`) | Step through up to 100 prior project snapshots. Loop / cycle / property edits are also recorded. |
+| **− % +** / **Fit** | Zoom out, current zoom indicator, zoom in, fit to one full cycle. The mouse wheel still works as a power-user shortcut. |
+
+### Canvas interactions
+
+| Action | Effect |
+|---|---|
+| **Click on event** | Select it (yellow outline) — tool independent. |
+| **Drag selected event body** | Move it (across channels too — drag up/down). |
+| **Drag right edge** of a Pulse | Resize duration. |
+| **Right-click event** | Context menu: convert to Pulse / ChannelOn / ChannelOff, **Duplicate**, or Delete. |
+| **Click on empty lane** | Depends on the active tool — see the tool table above. |
+| **Wheel** | Zoom in/out around the cursor (or use the toolbar buttons). |
+| **Ctrl+Wheel** | Pan horizontally. |
+| **← →** | Nudge the selected event by one snap step. |
+| **Ctrl+← →** | Nudge by 10 snap steps. |
+| **Ctrl+D** | Duplicate the selected event (offset by one snap step). |
+| **Delete** / **Backspace** | Delete the selected event. |
+| **Esc** | Deselect the current event. |
+| **S / P / O / F** | Switch tool (Select / Pulse / On / Off). |
+| **Shift** held during drag | Bypass snap for that gesture only. |
+
+Bars are coloured by type:
+
+- **Orange** — `Pulse` (sealed segment, fires `zc.ChannelPulseMs`).
+- **Green** — `ChannelOn` (fires `zc.ChannelOn`, channel stays driven).
+- **Red** — `ChannelOff` (fires `zc.ChannelOff`).
+
+A dashed red vertical line marks the end of cycle when **Loop** is ON.
+A faint vertical grid is drawn at every snap step when zoomed in
+enough (≥ 6 px between steps), so you can eyeball alignment.
+
+The header line above the lanes also reports the active tool and snap
+setting so the canvas is self-describing.
+
+### Property panel
+
+The right side of the timeline tab shows the selected event's editable
+properties:
+
+- **Type** — Pulse / ChannelOn / ChannelOff.
+- **Channel** — 1-4.
+- **Start (ms)** — when the event fires within the cycle.
+- **Duration** (Pulse only) — pulse length.
+- **Power**, **Freq**, **Width** — each can be a **literal** integer
+  (e.g. `power = 800`) or a **variable** reference (e.g. `power = _intensity`).
+  The Variable dropdown auto-suggests names from the form's MIN_MAX
+  items so dynamic patterns are easy to wire.
+- **Note** — optional comment that ends up as a `-- comment` in the
+  generated Lua.
+- **Delete** button — same as the Delete key.
+
+### Round-trip via JSON sentinel
+
+When you push to Lua, the timeline's project state is serialised to
+JSON and embedded in the script as a sentinel block:
+
+```lua
+--[[ ZC95_TIMELINE_V1
+{"v":1,"loop":false,"cycleMs":10000,"events":[{...}, ...]}
+]]
+```
+
+This block lives near the top of the script (just before the first
+`function`). When you click **← Read from Lua**, the editor scans for
+this sentinel and rebuilds the project from it — so you can quit the
+app, reopen the file later, and resume editing the timeline visually.
+
+If you delete the sentinel manually (or the script has none), Read
+from Lua reports "no timeline sentinel found" and leaves the canvas
+unchanged.
+
+### Generated Lua structure
+
+For each event, a one-shot `if` branch is emitted in `Loop()`:
+
+```lua
+if t >= 500 and not _tl_fired_3 then
+    _tl_fired_3 = true
+    zc.SetPower(1, _intensity)       -- variable reference
+    zc.SetFrequency(1, 150)
+    zc.SetPulseWidth(1, 150, 150)
+    zc.ChannelPulseMs(1, 100)
+end
+```
+
+The `_tl_fired_<N>` flags make each event fire **once per cycle**. In
+loop mode, they're reset whenever `time_ms` wraps modulo `cycleMs`.
+
+### Limitations
+
+- No nested logic (no `if/else` based on script state — only time-based
+  triggers).
+- No expressions in params (only literal or single variable name).
+- Timeline events fire in chronological order; if two events overlap
+  on the same channel they'll both fire, the second potentially
+  cutting short the first's `ChannelPulseMs` auto-off.
+- Manual edits to the generated `Setup()` / `Loop()` will be
+  overwritten on the next **→ Push to Lua**. Keep helper functions and
+  hand-rolled callbacks elsewhere in the script.
+
+---
+
+## 18. ▶ Test buttons on menu items
 
 In the **Menu Items** tab, the **▶ Test** button (next to Add / Edit /
 Duplicate / Remove) drives the **selected** item's value through a sweep
@@ -1111,7 +1428,7 @@ the `if (menu_id == N) then ... end` branch is correctly wired.
 
 ---
 
-## 17. Auto-save and draft recovery
+## 19. Auto-save and draft recovery
 
 Every 30 seconds, if the document has unsaved changes, the editor's
 content is dumped to:
@@ -1147,7 +1464,7 @@ interfering, because each writes to its own PID-suffixed file.
 
 ---
 
-## 18. Keyboard shortcuts
+## 20. Keyboard shortcuts
 
 | Shortcut | Action |
 |----------|--------|
@@ -1172,9 +1489,23 @@ interfering, because each writes to its own PID-suffixed file.
 | `Esc` | Close find/replace bar / dismiss completer popup |
 | `Tab` / `Enter` | Accept completion (when popup is open) |
 
+#### Timeline editor (when the canvas has focus)
+
+| Shortcut | Action |
+|----------|--------|
+| `S` / `P` / `O` / `F` | Switch tool — Select / Pulse / On / Off |
+| `← →` | Nudge selected event by one snap step |
+| `Ctrl+← →` | Nudge by 10 snap steps |
+| `Ctrl+D` | Duplicate selected event |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / Redo (up to 100 snapshots) |
+| `Delete` / `Backspace` | Delete selected event |
+| `Esc` | Deselect current event |
+| `Shift` (held during drag) | Bypass snap for that gesture only |
+| Wheel / `Ctrl+`Wheel | Zoom around cursor / pan horizontally |
+
 ---
 
-## 19. Settings, recent files, and persistence
+## 21. Settings, recent files, and persistence
 
 The application uses `QSettings` with organisation `zc95`,
 application `lua-builder`. On Windows that maps to the registry under
@@ -1199,7 +1530,7 @@ or the config file (Linux/macOS), reopen.
 
 ---
 
-## 20. Portable Windows build
+## 22. Portable Windows build
 
 Run `_build.bat` then `_deploy.bat`. The result is
 `dist\zc95-lua-builder\` with:
@@ -1237,7 +1568,7 @@ instance of the app running from `dist\` — close it first.
 
 ---
 
-## 21. Troubleshooting / FAQ
+## 23. Troubleshooting / FAQ
 
 ### Build issues
 
@@ -1326,7 +1657,7 @@ official presets benefits automatically.
 
 ---
 
-## 22. Known limitations
+## 24. Known limitations
 
 - **Lua parser is literal**, not evaluating. Expression values become 0.
 - **Long-bracket comments at level ≥ 1** (`--[==[ … ]==]`) aren't
@@ -1344,7 +1675,7 @@ official presets benefits automatically.
 
 ---
 
-## 23. Glossary
+## 25. Glossary
 
 - **Callback** — a Lua function the firmware (or simulator) calls in
   response to an event: `Setup`, `Loop`, `MinMaxChange`,
@@ -1400,6 +1731,24 @@ official presets benefits automatically.
 - **Reset reload** — the simulator's Reset button discards the
   `lua_State` and re-loads from a cached source so a 2nd Run starts
   from a genuinely fresh state.
+- **Timeline editor** — the visual 4-lane pattern builder accessible
+  via the **Timeline (Beta)** tab on the right pane. Round-trips with
+  the editor source through a JSON sentinel comment block.
+- **Sentinel block** — the `--[[ ZC95_TIMELINE_V1 … ]]` comment that
+  carries the timeline editor's serialised project state inside the
+  `.lua` script.
+- **TimelineParam** — a single event parameter (power / freq / width)
+  that can either be a literal integer or a reference to a Lua
+  variable name (e.g. `_intensity`). Lets timeline events react to
+  the form's MIN_MAX sliders at runtime.
+- **Safety profile** — a process-wide set of caps (max power, max
+  frequency, max pulse width, max pulse duration) applied at the
+  simulator level and surfaced in the linter. Configurable via
+  `View → Safety profile…` and lockable with a PIN.
+- **Locked profile** — a safety profile with `locked = true`.
+  Forces beginner mode ON, makes the View → Beginner mode toggle
+  read-only, and promotes safety-cap warnings to errors. Unlocking
+  requires the PIN set when locking.
 
 ---
 

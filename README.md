@@ -51,18 +51,25 @@ tweak it, and replay it.
 - **Form-driven editor** — fill out the Config, menu items and callbacks in
   tabs; the matching Lua is generated for you.
 - **Smart merge** (`Ctrl+G`) — regenerate only the `Config = {…}` block from
-  the form. Your function bodies are kept verbatim. Optional **diff dialog**
-  shows exactly what was added / removed.
+  the form. Your function bodies are kept verbatim. New callback stubs
+  are inserted at their **canonical position** (matching the firmware's
+  expected order), not appended at the end. If you uncheck a callback
+  whose body is still in the editor, you'll be asked **before** anything
+  is deleted. Optional **diff dialog** shows exactly what was added /
+  removed.
 - **Two-way sync** — parse an existing `.lua` back into the form
   (`Ctrl+Shift+G`). A status-bar badge flips between `● in sync` and
   `● form/code differ`.
 - **Embedded Lua 5.4 simulator** — really executes your script. The `zc.*`
-  API is stubbed and emits events that drive a 4-lane timeline. **Live
-  sliders / combos** in the simulator drive `MinMaxChange` and
-  `MultiChoiceChange` in real time so you can test the script
-  interactively without flashing. The timeline auto-clears on every
-  parameter change so you only see the result of the *current*
-  settings.
+  API is stubbed and emits events that drive a 4-lane timeline.
+  Bar **height = power**, so a low-intensity sustained ON renders as a
+  thin stripe and full power as a fat bar. **Live sliders / combos**
+  in the simulator drive `MinMaxChange` and `MultiChoiceChange` in
+  real time so you can test the script interactively without flashing.
+  The timeline auto-clears on every parameter change so you only see
+  the result of the *current* settings. A side **Variables** panel
+  shows every `_` -prefixed Lua global live so you can watch your
+  script's state evolve without `print()`.
 - **Lua 5.1 compat** — `module(…)`, `package.seeall` and `require("ettot")`
   all work in the simulator. Float arguments to `zc.SetFrequency` /
   `SetPower` / etc. are tolerated (truncated, matching device behavior).
@@ -75,12 +82,25 @@ tweak it, and replay it.
     what the value *feels* like, not just its range.
   - **Explain this script…** (`Ctrl+Shift+E`) — best-effort plain-English
     line-by-line breakdown of the Lua.
+  - **Timeline editor (Beta)** — drag-drop events on a 4-lane visual
+    canvas; the `Loop()` body is generated for you. Tool palette for
+    `Pulse / ChannelOn / ChannelOff`, configurable snap (default
+    100 ms, Shift to bypass), 100-step undo/redo, keyboard nudge, live
+    cursor time, zoom buttons + Fit. Round-trips with the editor
+    through an embedded JSON sentinel so you can keep editing visually
+    after re-opening the file. Each event's power/freq/width can be
+    either a literal value OR a reference to a form variable (e.g.
+    `_intensity`) for fully dynamic patterns.
 - **Safety guardrails** :
   - Linter warns on hard-coded high power, frequencies above 250 Hz,
     pulse widths above 200 µs, missing kill-switch, runaway `Loop()`
     bodies, and unconditional triphase enable.
   - **Pre-flight check** (`Ctrl+Shift+P`) — runs the linter AND a 1-second
     simulator dry-run, returns a confidence score 0-100%.
+  - **Safety profile** (`View → Safety profile…`) — process-wide caps
+    on `zc.SetPower` / `SetFrequency` / `SetPulseWidth` /
+    `ChannelPulseMs` enforced at the simulator level. Lockable with a
+    PIN (forces beginner mode, promotes safety warnings to errors).
   - **▶ Test** button per menu item — drives the slider through min /
     default / max and reports whether the script reacted.
   - **Auto-save** every 30s; recover unsaved drafts after a crash.
@@ -217,6 +237,10 @@ clean Windows machine without a redistributable installer.
 | `Ctrl+F` / `Ctrl+H`  | Find / Replace |
 | `F3` / `Shift+F3`    | Find next / previous |
 | `Ctrl+Space`         | Trigger autocomplete |
+| `Ctrl+Z` / `Ctrl+Y`  | Undo / Redo (Timeline editor — up to 100 snapshots) |
+| `S` / `P` / `O` / `F` | Timeline tool — Select / Pulse / On / Off |
+| `← →` / `Ctrl+← →`  | Timeline — nudge selected event by 1 / 10 snap step(s) |
+| `Ctrl+D`             | Timeline — duplicate selected event |
 
 For a complete walkthrough of every panel, every linter rule, every
 keyboard shortcut and every troubleshooting step, see [**HELP.md**](HELP.md).

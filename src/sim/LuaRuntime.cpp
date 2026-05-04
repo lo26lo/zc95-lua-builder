@@ -1,4 +1,5 @@
 #include "LuaRuntime.h"
+#include "../model/SafetyProfile.h"
 
 extern "C" {
 #include "lua.h"
@@ -313,6 +314,63 @@ bool LuaRuntime::extractScriptConfig(ScriptConfig& out, QString* warning) const 
     return true;
 }
 
+QVector<QPair<QString, QString>> LuaRuntime::inspectGlobals() const {
+    QVector<QPair<QString, QString>> out;
+    // Iterate the globals table.
+    lua_pushglobaltable(L);
+    int t = lua_gettop(L);
+    lua_pushnil(L);
+    while (lua_next(L, t) != 0) {
+        // key at -2, value at -1
+        if (lua_type(L, -2) != LUA_TSTRING) {
+            lua_pop(L, 1);
+            continue;
+        }
+        QString name = QString::fromUtf8(lua_tostring(L, -2));
+        // Convention: only show underscore-prefixed names (that's what
+        // user scripts use for state). Skips zc, Config, math, print,
+        // Setup, Loop, …
+        if (!name.startsWith('_') || name.startsWith("__")) {
+            lua_pop(L, 1);
+            continue;
+        }
+        QString val;
+        switch (lua_type(L, -1)) {
+            case LUA_TNUMBER:
+                if (lua_isinteger(L, -1)) {
+                    val = QString::number(lua_tointeger(L, -1));
+                } else {
+                    val = QString::number(lua_tonumber(L, -1), 'g', 6);
+                }
+                break;
+            case LUA_TBOOLEAN:
+                val = lua_toboolean(L, -1) ? "true" : "false";
+                break;
+            case LUA_TSTRING:
+                val = "\"" + QString::fromUtf8(lua_tostring(L, -1)) + "\"";
+                break;
+            case LUA_TNIL:
+                val = "nil";
+                break;
+            case LUA_TTABLE:
+                val = QString("table (%1 entries)").arg(lua_rawlen(L, -1));
+                break;
+            case LUA_TFUNCTION:
+                val = "function";
+                break;
+            default:
+                val = QString("<%1>").arg(lua_typename(L, lua_type(L, -1)));
+                break;
+        }
+        out.append({name, val});
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1); // global table
+    std::sort(out.begin(), out.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    return out;
+}
+
 bool LuaRuntime::callOptional(const char* name, int nargs, int nresults, QString* error) {
     lua_getglobal(L, name);
     if (!lua_isfunction(L, -1)) {
@@ -461,7 +519,12 @@ int LuaRuntime::api_ChannelOff(lua_State* L) {
 int LuaRuntime::api_ChannelPulseMs(lua_State* L) {
     auto* self_ = self(L);
     int ch = (int)checkIntLike(L, 1);
-    int dur = (int)checkIntLike(L, 2);
+    int durIn = (int)checkIntLike(L, 2);
+    int dur = SafetyProfile::current().clampPulseDuration(durIn);
+    if (dur != durIn) {
+        self_->m_output += QString("[SAFETY] ChannelPulseMs(%1, %2) clamped to %3 ms\n")
+                               .arg(ch).arg(durIn).arg(dur);
+    }
     if (ch >= 1 && ch <= 4) {
         auto& s = self_->m_state.channels[ch - 1];
         s.on = true;
@@ -479,7 +542,12 @@ int LuaRuntime::api_ChannelPulseMs(lua_State* L) {
 int LuaRuntime::api_SetPower(lua_State* L) {
     auto* self_ = self(L);
     int ch = (int)checkIntLike(L, 1);
-    int pw = (int)checkIntLike(L, 2);
+    int pwIn = (int)checkIntLike(L, 2);
+    int pw = SafetyProfile::current().clampPower(pwIn);
+    if (pw != pwIn) {
+        self_->m_output += QString("[SAFETY] SetPower(%1, %2) clamped to %3\n")
+                               .arg(ch).arg(pwIn).arg(pw);
+    }
     if (ch >= 1 && ch <= 4) self_->m_state.channels[ch - 1].power = pw;
     ChannelEvent e;
     e.timeMs = self_->m_currentTimeMs;
@@ -493,7 +561,12 @@ int LuaRuntime::api_SetPower(lua_State* L) {
 int LuaRuntime::api_SetFrequency(lua_State* L) {
     auto* self_ = self(L);
     int ch = (int)checkIntLike(L, 1);
-    int hz = (int)checkIntLike(L, 2);
+    int hzIn = (int)checkIntLike(L, 2);
+    int hz = SafetyProfile::current().clampFrequency(hzIn);
+    if (hz != hzIn) {
+        self_->m_output += QString("[SAFETY] SetFrequency(%1, %2) clamped to %3 Hz\n")
+                               .arg(ch).arg(hzIn).arg(hz);
+    }
     if (ch >= 1 && ch <= 4) self_->m_state.channels[ch - 1].frequencyHz = hz;
     ChannelEvent e;
     e.timeMs = self_->m_currentTimeMs;
@@ -507,8 +580,14 @@ int LuaRuntime::api_SetFrequency(lua_State* L) {
 int LuaRuntime::api_SetPulseWidth(lua_State* L) {
     auto* self_ = self(L);
     int ch = (int)checkIntLike(L, 1);
-    int pos = (int)checkIntLike(L, 2);
-    int neg = (int)checkIntLike(L, 3);
+    int posIn = (int)checkIntLike(L, 2);
+    int negIn = (int)checkIntLike(L, 3);
+    int pos = SafetyProfile::current().clampPulseWidth(posIn);
+    int neg = SafetyProfile::current().clampPulseWidth(negIn);
+    if (pos != posIn || neg != negIn) {
+        self_->m_output += QString("[SAFETY] SetPulseWidth(%1, %2, %3) clamped to (%4, %5) µs\n")
+                               .arg(ch).arg(posIn).arg(negIn).arg(pos).arg(neg);
+    }
     if (ch >= 1 && ch <= 4) {
         self_->m_state.channels[ch - 1].pulseWidthPosUs = pos;
         self_->m_state.channels[ch - 1].pulseWidthNegUs = neg;

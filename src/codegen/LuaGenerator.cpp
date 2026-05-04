@@ -1,6 +1,7 @@
 #include "LuaGenerator.h"
 #include <QStringList>
 #include <QRegularExpression>
+#include <climits>
 
 QString LuaGenerator::quote(const QString& s) {
     QString escaped = s;
@@ -104,16 +105,91 @@ bool hasFunctionDef(const QString& cleanSource, const QString& name) {
     return re.match(cleanSource).hasMatch();
 }
 
+// Locate `function <name>(...) ... end` in cleanSource. Walks the body
+// counting `function|if|for|while|repeat` openers and `end|until`
+// closers (we deliberately skip `do` because it accompanies `for`/`while`
+// rather than opening a new scope of its own — bare `do...end` blocks
+// are rare and would slightly miscount).
+QPair<int, int> findFunctionRangeInClean(const QString& clean, const QString& name) {
+    QRegularExpression startRe(
+        QString(R"(\bfunction\s+%1\s*\()").arg(QRegularExpression::escape(name)));
+    auto m = startRe.match(clean);
+    if (!m.hasMatch()) return {-1, -1};
+    int start = m.capturedStart();
+    int i = m.capturedEnd();
+
+    // Walk past the closing ')' of the signature.
+    int parenDepth = 1;
+    while (i < clean.length() && parenDepth > 0) {
+        QChar c = clean[i++];
+        if (c == '(') ++parenDepth;
+        else if (c == ')') --parenDepth;
+    }
+
+    // Now walk the body. depth = 1 (we're inside the function).
+    QRegularExpression openersRe(R"(\b(function|if|for|while|repeat)\b)");
+    QRegularExpression closersRe(R"(\b(end|until)\b)");
+    int depth = 1;
+    while (i < clean.length()) {
+        auto m1 = openersRe.match(clean, i);
+        auto m2 = closersRe.match(clean, i);
+        int p1 = m1.hasMatch() ? m1.capturedStart() : INT_MAX;
+        int p2 = m2.hasMatch() ? m2.capturedStart() : INT_MAX;
+        if (p1 == INT_MAX && p2 == INT_MAX) break;
+        if (p1 < p2) {
+            ++depth;
+            i = m1.capturedEnd();
+        } else {
+            --depth;
+            i = m2.capturedEnd();
+            if (depth == 0) return {start, i};
+        }
+    }
+    return {-1, -1};
+}
+
 }  // namespace
+
+QPair<int, int> LuaGenerator::findFunctionRange(const QString& source, const QString& name) {
+    QString clean = sanitize(source);
+    return findFunctionRangeInClean(clean, name);
+}
 
 QString LuaGenerator::mergeIntoSource(const ScriptConfig& config,
                                       const QString& existingSource,
-                                      bool smart) {
+                                      bool smart,
+                                      const QStringList& removeFunctions) {
     if (existingSource.trimmed().isEmpty()) {
         return generate(config, smart);
     }
 
-    auto range = findConfigBlock(existingSource);
+    QString working = existingSource;
+
+    // Phase 1 — remove any function the caller asked us to drop. We do
+    // this BEFORE the Config block replacement so the offsets stay
+    // consistent (each removal recomputes the clean copy).
+    for (const QString& fnName : removeFunctions) {
+        QString clean = sanitize(working);
+        auto fnRange = findFunctionRangeInClean(clean, fnName);
+        if (fnRange.first < 0) continue;
+        // Extend the range to swallow trailing whitespace + one newline,
+        // and any blank lines that immediately follow, so we don't leave
+        // a void where the function used to be.
+        int end = fnRange.second;
+        while (end < working.length() && (working[end] == ' ' || working[end] == '\t'))
+            ++end;
+        if (end < working.length() && working[end] == '\n') ++end;
+        // Eat additional blank lines.
+        while (end < working.length()) {
+            int lineEnd = working.indexOf('\n', end);
+            QString line = (lineEnd < 0) ? working.mid(end) : working.mid(end, lineEnd - end);
+            if (!line.trimmed().isEmpty()) break;
+            end = (lineEnd < 0) ? working.length() : lineEnd + 1;
+        }
+        working.remove(fnRange.first, end - fnRange.first);
+    }
+
+    auto range = findConfigBlock(working);
     if (range.first < 0) {
         // No Config block detected — fall back to a full generation rather
         // than silently producing something that won't run on-device.
@@ -123,11 +199,12 @@ QString LuaGenerator::mergeIntoSource(const ScriptConfig& config,
     QString newConfig = generateConfigBlock(config);
     if (newConfig.endsWith('\n')) newConfig.chop(1);
 
-    QString merged = existingSource;
+    QString merged = working;
     merged.replace(range.first, range.second - range.first, newConfig);
 
-    // Append stubs for any enabled function that isn't already defined.
-    QString clean = sanitize(merged);
+    // Build the canonical-order list of callbacks, with their stubs.
+    // Insertion below uses this same order both for "is this enabled" and
+    // for "where in the file should it land".
     struct FnSpec { bool enabled; const char* name; QString stub; };
 
     const auto& f = config.functions;
@@ -174,17 +251,44 @@ QString LuaGenerator::mergeIntoSource(const ScriptConfig& config,
             "end\n"},
     };
 
-    QString appended;
-    for (const auto& spec : fns) {
+    // Insert stubs at their canonical position rather than appending all
+    // at the end. We iterate canonical-DESCENDING so when several items
+    // need to be inserted at the same target position (e.g. all before
+    // the only existing successor), they end up in canonical-ASCENDING
+    // order in the file.
+    for (int i = fns.size() - 1; i >= 0; --i) {
+        const auto& spec = fns[i];
         if (!spec.enabled) continue;
-        if (hasFunctionDef(clean, spec.name)) continue;
-        if (appended.isEmpty() && !merged.endsWith("\n\n")) {
-            appended += merged.endsWith("\n") ? "\n" : "\n\n";
+        QString cleanNow = sanitize(merged);
+        if (hasFunctionDef(cleanNow, spec.name)) continue;
+
+        // Find the earliest canonical successor that already exists in
+        // the source. The new stub goes just before it. If none of the
+        // successors are present, we fall back to appending at end.
+        int targetPos = merged.length();
+        bool atEnd = true;
+        for (int j = i + 1; j < fns.size(); ++j) {
+            auto rng = findFunctionRangeInClean(cleanNow, fns[j].name);
+            if (rng.first >= 0) {
+                targetPos = rng.first;
+                atEnd = false;
+                break;
+            }
         }
-        appended += spec.stub;
-        appended += "\n";
+
+        if (atEnd) {
+            QString prefix;
+            if (!merged.endsWith("\n\n")) {
+                prefix = merged.endsWith("\n") ? "\n" : "\n\n";
+            }
+            merged += prefix + spec.stub;
+        } else {
+            // The stub already ends with "\n"; wrap it with leading +
+            // trailing newlines so we get blank lines on both sides.
+            QString block = "\n" + spec.stub + "\n";
+            merged.insert(targetPos, block);
+        }
     }
-    merged += appended;
     return merged;
 }
 

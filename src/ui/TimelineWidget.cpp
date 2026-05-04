@@ -95,51 +95,67 @@ void TimelineWidget::paintEvent(QPaintEvent*) {
                    QString::number(t / 1000.0, 'f', 1) + "s");
     }
 
-    // Reconstruct on/off per channel by walking events in time order.
-    struct Segment { double start; double end; bool isPulse; };
+    // Reconstruct on/off + power per channel by walking events in time
+    // order. Each segment records its power level so we can draw bars
+    // whose height is proportional to the effective output (power/1000).
+    struct Segment { double start; double end; bool isPulse; int power; };
     QVector<Segment> segs[4];
     bool on[4] = {false, false, false, false};
     double onSince[4] = {0, 0, 0, 0};
     bool isPulse[4] = {false, false, false, false};
+    int curPower[4] = {1000, 1000, 1000, 1000};   // device default
 
     for (const auto& e : m_events) {
         if (e.channel < 1 || e.channel > 4) continue;
         int idx = e.channel - 1;
         if (e.type == ChannelEventType::ChannelOn) {
             if (on[idx]) {
-                segs[idx].push_back({onSince[idx], e.timeMs, isPulse[idx]});
+                segs[idx].push_back({onSince[idx], e.timeMs, isPulse[idx], curPower[idx]});
             }
             on[idx] = true;
             onSince[idx] = e.timeMs;
             isPulse[idx] = false;
         } else if (e.type == ChannelEventType::ChannelOff) {
             if (on[idx]) {
-                segs[idx].push_back({onSince[idx], e.timeMs, isPulse[idx]});
+                segs[idx].push_back({onSince[idx], e.timeMs, isPulse[idx], curPower[idx]});
                 on[idx] = false;
             }
         } else if (e.type == ChannelEventType::ChannelPulseMs) {
-            // Treated as a sealed segment
-            segs[idx].push_back({e.timeMs, e.timeMs + e.param1, true});
+            // Treated as a sealed segment with the current power level.
+            segs[idx].push_back({e.timeMs, e.timeMs + e.param1, true, curPower[idx]});
+        } else if (e.type == ChannelEventType::SetPower) {
+            // If the channel is currently ON, close the running segment
+            // at this point and start a new one with the new power.
+            // Otherwise just remember the power for the next ON.
+            if (on[idx]) {
+                segs[idx].push_back({onSince[idx], e.timeMs, isPulse[idx], curPower[idx]});
+                onSince[idx] = e.timeMs;
+            }
+            curPower[idx] = e.param1;
         }
     }
     // Close any still-on segment at currentTime
     for (int i = 0; i < 4; ++i) {
-        if (on[i]) segs[i].push_back({onSince[i], m_currentTimeMs, isPulse[i]});
+        if (on[i]) segs[i].push_back({onSince[i], m_currentTimeMs, isPulse[i], curPower[i]});
     }
 
-    // Draw segments — no per-segment outline. Adjacent segments of the
-    // same kind merge into a single visual bar; only color changes (pulse
-    // = orange, sustained ON = green) draw a visible boundary. This stops
-    // the user mistaking pulse-edge marks for "cursors that don't move".
+    // Draw segments — bar HEIGHT is proportional to power (0..1000), so a
+    // low-intensity sustained ON looks like a thin stripe centered on the
+    // lane mid-line and full power looks like a fat bar. Adjacent
+    // segments still merge cleanly because we don't draw outlines.
     for (int i = 0; i < 4; ++i) {
         int yTop = r.top() + 4 + i * laneH;
-        int barY = yTop + laneH / 2 - 8;
-        int barH = 14;
+        int yMid = yTop + laneH / 2;
+        const int kMaxBarH = 14;
+        const int kMinBarH = 2;
         for (const auto& s : segs[i]) {
             if (s.end < tStart || s.start > tEnd) continue;
             int x1 = xOf(s.start);
             int x2 = xOf(s.end);
             int w = qMax(2, x2 - x1);
+            int pwr = qBound(0, s.power, 1000);
+            int barH = kMinBarH + (kMaxBarH - kMinBarH) * pwr / 1000;
+            int barY = yMid - barH / 2;
             QColor col = s.isPulse ? QColor("#f0a020") : QColor("#4ec96e");
             p.fillRect(QRect(x1, barY, w, barH), col);
         }

@@ -15,6 +15,7 @@ class IssuesPanel;
 class ApiDocPanel;
 class LcdPreviewPanel;
 class SimulatorPanel;
+class TimelineEditorPanel;
 class QSplitter;
 class QTabWidget;
 class QLabel;
@@ -54,6 +55,11 @@ private slots:
     void setBeginnerMode(bool beginner);
     void writeAutosave();
     void offerAutosaveRecovery();
+    void onTimelinePushToLua();
+    void onTimelinePullFromLua();
+    void onTimelineProjectChanged();
+    void openSafetyProfileDialog();
+    void updateSafetyBadge();
     // After loading a script into the simulator, refresh the form's menu
     // item IDs from Lua's resolved Config (the regex parser can't evaluate
     // identifiers like MenuId.FREQ, so this fills in the right integers).
@@ -89,6 +95,7 @@ private:
     ApiDocPanel* m_apiDocPanel = nullptr;
     LcdPreviewPanel* m_lcdPreview = nullptr;
     SimulatorPanel* m_simPanel = nullptr;
+    TimelineEditorPanel* m_timelinePanel = nullptr;
     LuaEditor* m_editor = nullptr;
     FindReplaceBar* m_findBar = nullptr;
     IssuesPanel* m_issuesPanel = nullptr;
@@ -109,6 +116,7 @@ private:
     bool m_beginnerMode = false;
     QAction* m_beginnerAction = nullptr;
     QLabel* m_beginnerBadge = nullptr;
+    QLabel* m_safetyBadge = nullptr;
     QList<QAction*> m_quickPresetActions;  // hidden in beginner mode
 
     // Autosave / draft recovery.

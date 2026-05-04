@@ -15,6 +15,9 @@
 #include <QSlider>
 #include <QComboBox>
 #include <QToolButton>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QSplitter>
 
 SimulatorPanel::SimulatorPanel(QWidget* parent) : QWidget(parent) {
     m_runtime = new LuaRuntime(this);
@@ -93,13 +96,43 @@ SimulatorPanel::SimulatorPanel(QWidget* parent) : QWidget(parent) {
     m_timeline = new TimelineWidget(this);
     outer->addWidget(m_timeline, 1);
 
-    // Log
-    m_log = new QPlainTextEdit(this);
+    // Log + variable inspector, side by side.
+    auto* bottom = new QSplitter(Qt::Horizontal, this);
+    bottom->setMaximumHeight(180);
+
+    m_log = new QPlainTextEdit(bottom);
     m_log->setReadOnly(true);
     m_log->setFont(QFont("Consolas", 9));
-    m_log->setMaximumHeight(160);
     m_log->setStyleSheet("background:#1e1e1e; color:#d4d4d4;");
-    outer->addWidget(m_log);
+    bottom->addWidget(m_log);
+
+    auto* inspectorBox = new QGroupBox("Variables", bottom);
+    inspectorBox->setToolTip(
+        "Live snapshot of the script's user variables (everything starting\n"
+        "with '_'). Refreshed every Loop tick. Useful to see how state\n"
+        "evolves in real time without printing.");
+    auto* inspectorLay = new QVBoxLayout(inspectorBox);
+    inspectorLay->setContentsMargins(4, 4, 4, 4);
+    m_globalsTable = new QTableWidget(0, 2, inspectorBox);
+    m_globalsTable->setHorizontalHeaderLabels({"Variable", "Value"});
+    m_globalsTable->verticalHeader()->setVisible(false);
+    m_globalsTable->horizontalHeader()->setStretchLastSection(true);
+    m_globalsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_globalsTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_globalsTable->setFocusPolicy(Qt::NoFocus);
+    m_globalsTable->setAlternatingRowColors(true);
+    m_globalsTable->setStyleSheet(
+        "QTableWidget { background:#1e1e1e; color:#d4d4d4; "
+        "               alternate-background-color:#252526; "
+        "               gridline-color:#333; font-family: Consolas, monospace; }"
+        "QHeaderView::section { background:#2d2d30; color:#aaa; "
+        "                       border:0; padding:3px; }");
+    inspectorLay->addWidget(m_globalsTable);
+    bottom->addWidget(inspectorBox);
+
+    bottom->setStretchFactor(0, 3);   // log gets 3/4
+    bottom->setStretchFactor(1, 2);   // inspector 2/4 (≈40%)
+    outer->addWidget(bottom);
 
     m_timer = new QTimer(this);
     m_timer->setInterval(50);
@@ -295,6 +328,26 @@ void SimulatorPanel::clearTimelineKeepingState() {
     }
 }
 
+void SimulatorPanel::refreshGlobals() {
+    if (!m_globalsTable || !m_runtime || !m_loaded) {
+        if (m_globalsTable) m_globalsTable->setRowCount(0);
+        return;
+    }
+    auto rows = m_runtime->inspectGlobals();
+    m_globalsTable->setRowCount(rows.size());
+    for (int i = 0; i < rows.size(); ++i) {
+        auto* k = new QTableWidgetItem(rows[i].first);
+        auto* v = new QTableWidgetItem(rows[i].second);
+        // Numeric values get aligned to the right for readability.
+        bool numeric;
+        rows[i].second.toDouble(&numeric);
+        if (numeric) v->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        m_globalsTable->setItem(i, 0, k);
+        m_globalsTable->setItem(i, 1, v);
+    }
+    m_globalsTable->resizeColumnToContents(0);
+}
+
 void SimulatorPanel::refreshState() {
     const auto& s = m_runtime->state();
     for (int i = 0; i < 4; ++i) {
@@ -308,6 +361,10 @@ void SimulatorPanel::refreshState() {
             "font-family: monospace; padding: 4px 8px; background:%1; color:%2; border-radius:3px;")
             .arg(ch.on ? "#3a5" : "#333", ch.on ? "#fff" : "#bbb"));
     }
+    // Always refresh the variable inspector at the same time as the
+    // channel state — they're conceptually paired ("what's the runtime
+    // doing right now").
+    refreshGlobals();
 }
 
 bool SimulatorPanel::resolveScriptConfig(ScriptConfig& out, QString* warning) const {

@@ -25,6 +25,12 @@ public:
     // The regex parser can't resolve those; this method can.
     bool extractScriptConfig(ScriptConfig& out, QString* warning = nullptr) const;
 
+    // Snapshot all "interesting" Lua globals (underscore-prefixed by
+    // convention — that's what every official script uses for user
+    // state). Returns a vector of (name, displayed-value) pairs sorted
+    // alphabetically. Skips functions, tables, and stdlib globals.
+    QVector<QPair<QString, QString>> inspectGlobals() const;
+
     bool callSetup(QString* error = nullptr);                    // optional
     bool callLoop(double time_ms, QString* error = nullptr);     // mandatory
     bool callMinMaxChange(int menuId, int val, QString* error = nullptr);

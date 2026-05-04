@@ -11,6 +11,10 @@
 #include "ui/LcdPreviewPanel.h"
 #include "ui/SimulatorPanel.h"
 #include "ui/WizardDialog.h"
+#include "ui/TimelineEditorPanel.h"
+#include "ui/SafetyProfileDialog.h"
+#include "codegen/TimelineCodegen.h"
+#include "model/SafetyProfile.h"
 #include "codegen/LuaGenerator.h"
 #include "codegen/LuaParser.h"
 #include "codegen/Linter.h"
@@ -86,6 +90,9 @@ MainWindow::MainWindow() {
     connect(m_autosaveTimer, &QTimer::timeout, this, &MainWindow::writeAutosave);
     m_autosaveTimer->start();
 
+    // Reflect the persisted safety profile in the status bar + beginner mode.
+    updateSafetyBadge();
+
     statusBar()->showMessage("Ready");
 }
 
@@ -121,8 +128,10 @@ void MainWindow::buildUi() {
     // ----- Right side: editor on top, simulator tab next to editor -----
     m_rightTabs = new QTabWidget(this);
     m_simPanel = new SimulatorPanel(this);
+    m_timelinePanel = new TimelineEditorPanel(this);
     m_rightTabs->addTab(editorContainer, "Editor");
     m_rightTabs->addTab(m_simPanel, "Simulator");
+    m_rightTabs->addTab(m_timelinePanel, "Timeline (Beta)");
 
     m_horizSplitter->addWidget(m_leftTabs);
     m_horizSplitter->addWidget(m_rightTabs);
@@ -141,6 +150,14 @@ void MainWindow::buildUi() {
     addDockWidget(Qt::BottomDockWidgetArea, m_issuesDock);
 
     // ----- Status bar widgets -----
+    m_safetyBadge = new QLabel("", this);
+    m_safetyBadge->setStyleSheet(
+        "padding: 2px 8px; border-radius: 3px; background:#5a3a1f; color:#ffb86b;");
+    m_safetyBadge->setToolTip(
+        "Safety profile is active. View → Safety profile… to inspect.");
+    m_safetyBadge->hide();
+    statusBar()->addPermanentWidget(m_safetyBadge);
+
     m_beginnerBadge = new QLabel("", this);
     m_beginnerBadge->setStyleSheet(
         "padding: 2px 8px; border-radius: 3px; background:#3b4d68; color:#a8c5e8;");
@@ -227,6 +244,12 @@ void MainWindow::buildMenus() {
         "if you're new to ZC95 Lua scripting.");
     connect(m_beginnerAction, &QAction::toggled, this, &MainWindow::setBeginnerMode);
 
+    viewMenu->addSeparator();
+    auto* safetyAct = viewMenu->addAction("&Safety profile…",
+                                          this, &MainWindow::openSafetyProfileDialog);
+    safetyAct->setStatusTip(
+        "Set hard caps on power / frequency / pulse width and lock with a PIN.");
+
     auto* showDiffAct = viewMenu->addAction("Show &diff after regenerate");
     showDiffAct->setCheckable(true);
     {
@@ -277,6 +300,16 @@ void MainWindow::connectSignals() {
         ScriptConfig snap = collectConfig();
         m_lcdPreview->setItems(snap.menuItems, snap.name, snap.softButtonLabel);
         if (m_simPanel) m_simPanel->setMenuItems(snap.menuItems);
+        // Feed MIN_MAX variable names into the timeline editor so the
+        // user can reference them as dynamic params.
+        if (m_timelinePanel) {
+            QStringList vars;
+            for (const auto& mi : snap.menuItems) {
+                if (mi.type != MenuItemType::MinMax) continue;
+                vars << LuaGenerator::variableNameFor(mi);
+            }
+            m_timelinePanel->setAvailableVariables(vars);
+        }
         statusBar()->showMessage("Form changed — press Ctrl+G to regenerate code", 4000);
     };
     connect(m_configPanel, &ConfigPanel::changed, this, formChanged);
@@ -285,6 +318,15 @@ void MainWindow::connectSignals() {
 
     connect(m_menuItemsPanel, &MenuItemsPanel::testItemRequested,
             this, &MainWindow::testMenuItem);
+
+    if (m_timelinePanel) {
+        connect(m_timelinePanel, &TimelineEditorPanel::pushToLuaRequested,
+                this, &MainWindow::onTimelinePushToLua);
+        connect(m_timelinePanel, &TimelineEditorPanel::pullFromLuaRequested,
+                this, &MainWindow::onTimelinePullFromLua);
+        connect(m_timelinePanel, &TimelineEditorPanel::projectChanged,
+                this, &MainWindow::onTimelineProjectChanged);
+    }
 
     connect(m_issuesPanel, &IssuesPanel::jumpToLine, this, [this](int line) {
         if (line <= 0) return;
@@ -532,6 +574,130 @@ void MainWindow::fixupFormFromSimulator() {
     m_suppressDirty = prev;
 }
 
+void MainWindow::openSafetyProfileDialog() {
+    SafetyProfileDialog dlg(this);
+    if (dlg.exec() == QDialog::Accepted) {
+        updateSafetyBadge();
+        // If the profile is now locked, force beginner mode ON and lock
+        // its toggle. If it just unlocked, restore normal toggle behavior.
+        const auto& sp = SafetyProfile::current();
+        if (sp.locked && m_beginnerAction && !m_beginnerAction->isChecked()) {
+            m_beginnerAction->setChecked(true);  // emits toggled → setBeginnerMode
+        }
+        if (m_beginnerAction) m_beginnerAction->setEnabled(!sp.locked);
+        statusBar()->showMessage(
+            sp.locked
+                ? "Safety profile locked — clamps active, advanced UI disabled."
+                : (sp.isActive() ? "Safety profile updated." : "Safety profile cleared."),
+            5000);
+    }
+}
+
+void MainWindow::updateSafetyBadge() {
+    if (!m_safetyBadge) return;
+    const auto& sp = SafetyProfile::current();
+    if (!sp.isActive()) {
+        m_safetyBadge->hide();
+        if (m_beginnerAction) m_beginnerAction->setEnabled(true);
+        return;
+    }
+    QString label = sp.locked ? "🔒 Safety locked" : "● Safety active";
+    label += QString(" (max pwr=%1").arg(sp.maxPower);
+    if (sp.maxFrequencyHz < 300)    label += QString(" · %1 Hz").arg(sp.maxFrequencyHz);
+    if (sp.maxPulseWidthUs < 255)   label += QString(" · %1 µs").arg(sp.maxPulseWidthUs);
+    label += ")";
+    m_safetyBadge->setText(label);
+    m_safetyBadge->show();
+    // When locked, force beginner mode on and disable its toggle.
+    if (sp.locked) {
+        if (m_beginnerAction && !m_beginnerAction->isChecked()) m_beginnerAction->setChecked(true);
+        if (m_beginnerAction) m_beginnerAction->setEnabled(false);
+    } else {
+        if (m_beginnerAction) m_beginnerAction->setEnabled(true);
+    }
+}
+
+void MainWindow::onTimelinePushToLua() {
+    if (!m_timelinePanel || !m_editor) return;
+    const auto& proj = m_timelinePanel->project();
+
+    // Strategy: replace the existing Setup() and Loop() bodies with
+    // freshly generated ones, and update the sentinel JSON block.
+    QString src = m_editor->toPlainText();
+
+    // Step 1: remove existing Setup and Loop functions if present.
+    auto stripFn = [&](const QString& name) {
+        auto rng = LuaGenerator::findFunctionRange(src, name);
+        if (rng.first < 0) return;
+        int end = rng.second;
+        // Eat trailing whitespace + one newline + blank lines.
+        while (end < src.length() && (src[end] == ' ' || src[end] == '\t')) ++end;
+        if (end < src.length() && src[end] == '\n') ++end;
+        src.remove(rng.first, end - rng.first);
+    };
+    stripFn("Setup");
+    stripFn("Loop");
+
+    // Step 2: update or insert the sentinel.
+    src = TimelineCodegen::updateSentinel(src, proj);
+
+    // Step 3: append the freshly-generated body (Setup + Loop).
+    QString body = TimelineCodegen::generateBody(proj);
+    // generateBody already includes its own sentinel — strip it from
+    // body, since we just placed one via updateSentinel.
+    int bodySentinelStart = body.indexOf(TimelineCodegen::kSentinelOpen);
+    if (bodySentinelStart >= 0) {
+        int closeStart = body.indexOf(TimelineCodegen::kSentinelClose, bodySentinelStart);
+        if (closeStart >= 0) {
+            int closeEnd = closeStart + (int)qstrlen(TimelineCodegen::kSentinelClose);
+            // Also eat the comment header lines preceding the sentinel.
+            int hdrStart = body.lastIndexOf("\n--", bodySentinelStart);
+            if (hdrStart < 0) hdrStart = 0;
+            else hdrStart += 1;
+            // Skip any consecutive comment lines from hdrStart up to before sentinel.
+            // Simpler: just delete from start of header (or 0) to closeEnd + trailing newlines.
+            while (closeEnd < body.length() && (body[closeEnd] == '\n' || body[closeEnd] == ' ')) ++closeEnd;
+            body.remove(0, closeEnd);
+        }
+    }
+
+    if (!src.endsWith("\n\n")) src += src.endsWith("\n") ? "\n" : "\n\n";
+    src += body;
+
+    m_suppressDirty = true;
+    m_editor->setPlainText(src);
+    m_suppressDirty = false;
+    setDirty(true);
+    updateSyncIndicator();
+    if (m_simPanel) m_simPanel->loadSourceSilent(src);
+    statusBar()->showMessage(
+        QString("Timeline pushed to editor — %1 event(s).").arg(proj.events.size()), 4000);
+}
+
+void MainWindow::onTimelinePullFromLua() {
+    if (!m_timelinePanel || !m_editor) return;
+    bool found = false;
+    auto proj = TimelineCodegen::extractProject(m_editor->toPlainText(), &found);
+    if (!found) {
+        QMessageBox::information(this, "Timeline",
+            "No timeline sentinel was found in the editor. Push the "
+            "current timeline to Lua first, or load a script that was "
+            "generated by the timeline editor.");
+        return;
+    }
+    m_timelinePanel->setProject(proj);
+    statusBar()->showMessage(
+        QString("Timeline read from editor — %1 event(s).").arg(proj.events.size()), 4000);
+}
+
+void MainWindow::onTimelineProjectChanged() {
+    // The user is editing the timeline. Mark dirty so they don't lose
+    // work unsaved, and update the sync badge (timeline diverges from
+    // the editor source until "Push to Lua" is clicked).
+    if (m_suppressDirty) return;
+    setDirty(true);
+}
+
 void MainWindow::cleanupAutosave() {
     if (!m_autosavePath.isEmpty()) QFile::remove(m_autosavePath);
     if (!m_autosaveMetaPath.isEmpty()) QFile::remove(m_autosaveMetaPath);
@@ -595,7 +761,50 @@ void MainWindow::newFromWizard() {
 void MainWindow::regenerate() {
     ScriptConfig cfg = collectConfig();
     QString existing = m_editor->toPlainText();
-    QString code = LuaGenerator::mergeIntoSource(cfg, existing);
+
+    // Detect callbacks that are unticked in the form but still present in
+    // the source. The user just unchecked them — they probably want them
+    // gone, but their bodies may contain user-written code, so prompt.
+    struct CbProbe { bool enabled; const char* name; };
+    const QVector<CbProbe> probes = {
+        {cfg.functions.setup,                   "Setup"},
+        // Loop is intentionally not removable from the form (always-on).
+        {cfg.functions.minMaxChange,            "MinMaxChange"},
+        {cfg.functions.multiChoiceChange,       "MultiChoiceChange"},
+        {cfg.functions.softButton,              "SoftButton"},
+        {cfg.functions.externalTrigger,         "ExternalTrigger"},
+        {cfg.functions.bluetoothRemoteKeypress, "BluetoothRemoteKeypress"},
+        {cfg.functions.bluetoothHidEvent,       "BluetoothHidEvent"},
+        {cfg.functions.audioIntensityChange,    "AudioIntensityChange"},
+    };
+    QStringList orphanFunctions;
+    for (const auto& p : probes) {
+        if (p.enabled) continue;
+        auto rng = LuaGenerator::findFunctionRange(existing, p.name);
+        if (rng.first >= 0) orphanFunctions << QString::fromLatin1(p.name);
+    }
+
+    QStringList toRemove;
+    if (!orphanFunctions.isEmpty()) {
+        QString list;
+        for (const QString& n : orphanFunctions) list += "<li><b>" + n + "()</b></li>";
+        auto ans = QMessageBox::question(this, "Remove unchecked callbacks?",
+            "<p>The following callback(s) are present in the editor but you just "
+            "<b>unchecked</b> them in the Functions panel:</p>"
+            "<ul>" + list + "</ul>"
+            "<p>Their bodies will be <b>permanently deleted</b> from the script "
+            "if you say Yes. Choose <b>No</b> to keep them in place "
+            "(they'll just stop being part of the form).</p>",
+            QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel,
+            QMessageBox::No);
+        if (ans == QMessageBox::Cancel) {
+            statusBar()->showMessage("Regenerate cancelled.", 3000);
+            return;
+        }
+        if (ans == QMessageBox::Yes) toRemove = orphanFunctions;
+    }
+
+    QString code = LuaGenerator::mergeIntoSource(cfg, existing, true, toRemove);
 
     QTextCursor c = m_editor->textCursor();
     int pos = c.position();

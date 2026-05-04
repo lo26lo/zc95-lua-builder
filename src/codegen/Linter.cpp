@@ -1,4 +1,5 @@
 #include "Linter.h"
+#include "../model/SafetyProfile.h"
 
 #include <QRegularExpression>
 #include <QSet>
@@ -406,6 +407,69 @@ void Linter::lintSource(const ScriptConfig& config, const QString& source, QVect
             out.push_back({IssueSeverity::Info, -1,
                 "No zc.* calls anywhere in the script.",
                 "The pattern won't drive any channel — did you forget to write the body?"});
+        }
+    }
+
+    // S0. Safety-profile caps. Each numeric literal that exceeds the
+    // configured cap is flagged. Severity:
+    //   • locked profile    → Error (Pre-flight blocks; user must lower)
+    //   • unlocked profile  → Warning (informational)
+    {
+        const auto& sp = SafetyProfile::current();
+        IssueSeverity sev = sp.locked ? IssueSeverity::Error : IssueSeverity::Warning;
+        if (sp.isActive()) {
+            // SetPower
+            QRegularExpression re(R"(zc\.SetPower\s*\(\s*-?\d+\s*,\s*(\d+)\s*\))");
+            auto it = re.globalMatch(clean);
+            while (it.hasNext()) {
+                auto m = it.next();
+                int v = m.captured(1).toInt();
+                if (v > sp.maxPower) {
+                    out.push_back({sev, lineOf(m.capturedStart()),
+                        QString("zc.SetPower(*, %1) exceeds the safety cap of %2.").arg(v).arg(sp.maxPower),
+                        sp.locked ? "Lower the value, or unlock the safety profile."
+                                  : "Lower the value, or raise the cap in View → Safety profile."});
+                }
+            }
+            // SetFrequency
+            QRegularExpression re2(R"(zc\.SetFrequency\s*\(\s*-?\d+\s*,\s*(\d+)\s*\))");
+            it = re2.globalMatch(clean);
+            while (it.hasNext()) {
+                auto m = it.next();
+                int v = m.captured(1).toInt();
+                if (v > sp.maxFrequencyHz) {
+                    out.push_back({sev, lineOf(m.capturedStart()),
+                        QString("zc.SetFrequency(*, %1 Hz) exceeds the safety cap of %2 Hz.").arg(v).arg(sp.maxFrequencyHz),
+                        {}});
+                }
+            }
+            // SetPulseWidth (pos AND neg)
+            QRegularExpression re3(R"(zc\.SetPulseWidth\s*\(\s*-?\d+\s*,\s*(\d+)\s*,\s*(\d+)\s*\))");
+            it = re3.globalMatch(clean);
+            while (it.hasNext()) {
+                auto m = it.next();
+                int pos = m.captured(1).toInt();
+                int neg = m.captured(2).toInt();
+                if (pos > sp.maxPulseWidthUs || neg > sp.maxPulseWidthUs) {
+                    out.push_back({sev, lineOf(m.capturedStart()),
+                        QString("zc.SetPulseWidth(*, %1, %2) exceeds the safety cap of %3 µs.")
+                            .arg(pos).arg(neg).arg(sp.maxPulseWidthUs),
+                        {}});
+                }
+            }
+            // ChannelPulseMs duration
+            QRegularExpression re4(R"(zc\.ChannelPulseMs\s*\(\s*-?\d+\s*,\s*(\d+)\s*\))");
+            it = re4.globalMatch(clean);
+            while (it.hasNext()) {
+                auto m = it.next();
+                int v = m.captured(1).toInt();
+                if (v > sp.maxPulseDurationMs) {
+                    out.push_back({sev, lineOf(m.capturedStart()),
+                        QString("zc.ChannelPulseMs(*, %1 ms) exceeds the safety cap of %2 ms.")
+                            .arg(v).arg(sp.maxPulseDurationMs),
+                        {}});
+                }
+            }
         }
     }
 

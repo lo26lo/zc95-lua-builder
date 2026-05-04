@@ -78,6 +78,8 @@ set(MODEL_SOURCES
     src/model/ScriptConfig.cpp
     src/model/MenuItem.h
     src/model/MenuItem.cpp
+    src/model/SafetyProfile.h
+    src/model/SafetyProfile.cpp
 )
 
 set(CODEGEN_SOURCES
@@ -93,6 +95,10 @@ set(CODEGEN_SOURCES
     src/codegen/Explainer.cpp
     src/codegen/LineDiff.h
     src/codegen/LineDiff.cpp
+    src/codegen/TimelineProject.h
+    src/codegen/TimelineProject.cpp
+    src/codegen/TimelineCodegen.h
+    src/codegen/TimelineCodegen.cpp
 )
 
 set(SIM_SOURCES
@@ -130,6 +136,12 @@ set(UI_SOURCES
     src/ui/SimulatorPanel.cpp
     src/ui/WizardDialog.h
     src/ui/WizardDialog.cpp
+    src/ui/TimelineEditorWidget.h
+    src/ui/TimelineEditorWidget.cpp
+    src/ui/TimelineEditorPanel.h
+    src/ui/TimelineEditorPanel.cpp
+    src/ui/SafetyProfileDialog.h
+    src/ui/SafetyProfileDialog.cpp
 )
 
 set(APP_SOURCES
