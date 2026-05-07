@@ -155,10 +155,14 @@ Process-wide caps applied at the simulator level + linter level.
   with a 12 px translucent halo + 3 px solid yellow line + 1 px white
   core + double yellow triangles top & bottom. Per-segment outlines
   removed (they looked like fake cursors).
-- **Auto-clear timeline on parameter change** — moving a slider /
-  combo wipes `m_allEvents` and re-seeds with current `ChannelOn`
-  state for any channel still on, so the timeline reflects only the
-  effects of the *current* parameter values.
+- **User-input markers on the timeline** — moving a slider / combo,
+  pressing Soft Btn, or firing Trigger 1A appends a `UserInput` event
+  to `m_allEvents`. `TimelineWidget` renders these as a labelled,
+  colour-coded vertical dashed line so you can correlate input with
+  reaction. Hovering any segment also shows an exact tooltip
+  (channel, kind, start/end, duration, power). The previous
+  auto-wipe-and-reseed behaviour was dropped — markers are far more
+  informative than throwing the history away.
 - **Linter** dead `LineFinder` removed. `replaceCurrent` honors the
   case-sensitivity flag. `updatePulses` no longer emits ChannelOff
   with `timeMs = -1`.
@@ -312,9 +316,10 @@ Manual GUI verification still TODO for:
   inspectGlobals.
 - `src/ui/SimulatorPanel.{h,cpp}` — live sliders, reset reload, signals
   for LCD mirror, testMenuItemDrive, resolveScriptConfig, variables
-  table, clearTimelineKeepingState.
+  table, pushUserInput.
 - `src/ui/TimelineWidget.cpp` — yellow cursor, no-outline segments,
-  power-as-bar-height.
+  power-as-bar-height, cyan/magenta/orange user-input markers, hover
+  tooltips on segments and markers.
 - `src/codegen/LuaGenerator.{h,cpp}` — function removal,
   canonical-position insertion, findFunctionRange.
 - `src/codegen/Linter.cpp` — 7 safety rules + S0 cap-checks.
@@ -373,6 +378,22 @@ C3 — Safety profile (locked caps)
   + Linter rule S0 (cap-check)
   + LuaRuntime clamps in api_SetPower / SetFrequency / SetPulseWidth
     / ChannelPulseMs
+
+Timeline UX — user-input markers + hover tooltips
+  Added a UserInput event type carrying a category + label. Sliders /
+  combos / Soft Btn / Trigger 1A push one at currentTimeMs; the
+  TimelineWidget renders them as cyan / magenta / orange dashed
+  vertical lines with a label in a band above the lanes. Segments
+  and markers are now cached on setEvents() so mouseMoveEvent can
+  resolve hover targets cheaply and feed QToolTip live values
+  (channel, kind, start/end, duration, power for bars; category +
+  label + timestamp for markers). The previous auto-wipe-on-slider
+  behaviour was dropped — keeping history annotated is much more
+  useful than throwing it away.
+  - ChannelEvent: new UserInput type, param1 = category code
+  - SimulatorPanel: pushUserInput helper, removed clearTimelineKeepingState
+  - TimelineWidget: cached segments/markers, paintEvent renders the
+    new band, mouseMoveEvent + leaveEvent drive QToolTip
 
 Docs
   - HELP.md: 25 sections; new §14 Safety profile, §17 Timeline editor.

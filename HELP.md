@@ -382,20 +382,26 @@ LCD preview's `paintEvent` reads the override if present, otherwise
 falls back to the form's `default` value. Loading a different script
 clears all overrides.
 
-#### Auto-clear on parameter change
+#### User-input markers on parameter change
 
-Whenever you move a slider or change a combo in the simulator's
-*Menu controls* section, the timeline event history is **wiped** and
-re-seeded with the current channel state. This way the next pulses
-that appear reflect *only* the new parameter values — you're not
-visually confused by "old" pulses from before the change.
+Whenever you move a slider, pick a multi-choice option, push **Soft
+Btn**, or fire **Trigger 1A**, a labelled vertical dashed line is
+stamped on the timeline at the current simulated time:
 
-The simulator clock keeps running and the `lua_State` is untouched —
-only the visual event buffer is reset. For a Pulse pattern, you'll
-see the rate change immediately and cleanly. For a Constant pattern,
-the channel-ON segment continues uninterrupted because the re-seed
-synthesises a `ChannelOn` event at `t = now` for any channel that's
-currently on.
+- **Cyan** — menu input. Label is `Title=value` (e.g. `Frequency=200`)
+  or `Title=Choice text` for a multi-choice combo.
+- **Magenta** — Soft Btn press / release (`Soft↓` / `Soft↑`).
+- **Orange** — external trigger (`Trig 1A`).
+
+These markers let you read the timeline as a story: *"I bumped
+intensity here → the green segments thickened immediately, the orange
+pulses got denser"*. The marker is appended **before** the script
+reacts so the dashed line always sits just to the left of the events
+its callback produced.
+
+Earlier versions wiped the event history on every slider change. That
+behavior is gone — markers preserve full history, which makes the
+before/after comparison much easier to see.
 
 ---
 
@@ -562,6 +568,14 @@ If the script doesn't react when you move the slider, you've probably:
   yellow halo, a 3 px solid yellow line, a 1 px white core — plus a
   triangle at the top and bottom. Designed to remain visible even on
   fully-saturated channels.
+- **Dashed user-input markers**: cyan (menu slider / combo), magenta
+  (Soft Btn), orange (Trigger 1A). Each carries a small label in the
+  band above the lanes — see §5 *User-input markers*.
+- **Hover tooltip**: pass the mouse over a green/orange bar and you get
+  the exact `CH<n>`, segment kind, start/end times in seconds, duration
+  in ms and power level. Hovering an empty stretch of a lane shows the
+  channel name + the time at the cursor; hovering a marker shows its
+  category, label and timestamp.
 - X-axis: seconds with one decimal.
 
 The timeline is a 5 s sliding window — once simulated time exceeds 5 s
@@ -1282,6 +1296,7 @@ experimental — the round-trip is stable, but the API may still evolve.
 |---|---|
 | **Loop** checkbox | When ON, generated `Loop()` wraps `time_ms` modulo the cycle. The pattern restarts automatically every cycle. |
 | **Cycle (ms)** | Length of one cycle. Used for the loop wrap and as the default viewport width. |
+| **📸 Capture from Sim** | Run the editor's current script in a sandboxed runtime for the configured cycle length, capture every `ChannelOn` / `Off` / `PulseMs` it emits, and overlay them on the lanes in dim green/orange (read-only). Use this to *visualise* dynamically-scheduled scripts (e.g. `tens.lua`, `climb.lua`) that have no JSON sentinel to read. |
 | **← Read from Lua** | Re-read the timeline JSON sentinel from the current editor. Useful if you've manually edited the Lua and the timeline is stale. |
 | **→ Push to Lua** | Generate `Setup()` + `Loop()` from the current timeline and write them into the editor (replacing any previous timeline block). The sentinel comment is also updated. |
 | **Clear all** | Wipe every event (undoable with **Ctrl+Z**). |
@@ -1351,6 +1366,56 @@ properties:
   generated Lua.
 - **Delete** button — same as the Delete key.
 
+### Capture overlay (read-only ghost trace)
+
+The Timeline editor was originally limited to scripts it had generated
+itself — the **← Read from Lua** path looks for a `ZC95_TIMELINE_V1`
+sentinel and gives up if it's missing. That made the tab visually empty
+when you loaded any of the bundled official scripts (`tens.lua`,
+`climb.lua`, `combo.lua`, …) because they compute their schedules
+dynamically and have no sentinel.
+
+**📸 Capture from Sim** fills that gap. It:
+
+1. Reads the editor's current source.
+2. Spins up a fresh sandbox `LuaRuntime` (separate from the Simulator
+   tab — your live simulator session is not disturbed).
+3. Runs `Setup()` then `Loop()` in **4 ms steps** for at least **60 s**
+   of simulated time (or longer if `Cycle (ms)` is bigger). The fine
+   4 ms step is intentional: it matches the ~244 Hz tick rate that the
+   bundled `ettot.at244hz`-family scripts (torment, climb, combo,
+   phasing, rhythm, orgasm, random2, stroke, intense) count internally.
+   At the live simulator's default 20 ms/tick those scripts undersample
+   their own block timer by ~5× and never enter their main pattern.
+4. Drains all `ChannelOn` / `ChannelOff` / `ChannelPulseMs` events.
+5. Overlays them on the 4 lanes as a **dimmed gray-green/orange ghost**
+   trace, drawn *behind* any editable events.
+
+Notes:
+
+- **Snapshot, not live.** If you move a slider in the Simulator tab or
+  edit the Lua, click **📸 Capture from Sim** again to refresh.
+- The overlay is read-only — you can't drag or right-click it. It's
+  there to *see* what the script does.
+- A small grey caption ("Sim snapshot · *t* s · gray = script behaviour
+  (read-only)") appears at the bottom of the canvas while a capture is
+  loaded, so it's never confused with your editable events.
+- The capture is auto-cleared when you load a different file (Open,
+  preset, official script, New, Wizard) so a stale ghost from one
+  script never sticks to another.
+- If the script's `Loop()` raises an error mid-run, the status bar
+  reports the failure time and you still see the events captured up
+  to that point.
+- **Cycle auto-bumped.** Slow ettot scripts often emit their first
+  channel activity around t=20-50 s. If your editor's `Cycle (ms)` was
+  10 000 (the default) when you clicked Capture and the captured trace
+  extends past it, the spinbox is automatically rounded up to the next
+  5 s multiple so the trace fits in the viewport. The bump is
+  undoable (Ctrl+Z) like any cycle change.
+- **Status bar messages** tell you what happened: number of channel
+  events captured, whether the cycle was bumped, or a hint when the
+  script seems "stuck off" (e.g. all activity in the first 100 ms).
+
 ### Round-trip via JSON sentinel
 
 When you push to Lua, the timeline's project state is serialised to
@@ -1399,6 +1464,9 @@ loop mode, they're reset whenever `time_ms` wraps modulo `cycleMs`.
 - Manual edits to the generated `Setup()` / `Loop()` will be
   overwritten on the next **→ Push to Lua**. Keep helper functions and
   hand-rolled callbacks elsewhere in the script.
+- The **📸 Capture from Sim** overlay is a one-shot snapshot. Slider
+  changes, code edits, or different starting parameters won't update
+  the trace — re-click Capture to refresh.
 
 ---
 
@@ -1591,6 +1659,20 @@ auto-loaded now. If not: press `Ctrl+R`. If still not, check the
 **Issues** dock for a Lua syntax error in the editor that prevented
 the silent load.
 
+**The simulator runs but `torment.lua` (or `climb.lua`, `combo.lua`,
+`phasing2.lua`, `rhythm.lua`, `orgasm.lua`, `random2.lua`, `stroke.lua`,
+`intense.lua`) doesn't seem to do anything — channels turn ON briefly
+at t=0 then go OFF and stay off.** This is an undersampling issue: those
+scripts use the `ettot` library which counts its own ticks at 244 Hz
+(`ettot.at244hz`). At the simulator's default **20 ms/tick** the script's
+internal block timer increments only ~50 times per simulated second
+instead of ~244 — too slow to ever cross its threshold and trigger the
+real pattern. **Fix:** lower the **N ms/tick** spinbox (top right of the
+Simulator) to **4 or 5** before clicking Run. Channels will then start
+firing as designed within ~5-25 simulated seconds. The Timeline (Beta)'s
+**📸 Capture from Sim** button already forces dt=4 ms internally for the
+same reason.
+
 **"module 'ettot' not found"** in the simulator. The polyfill or the
 resource searcher isn't running. Make sure you rebuilt after pulling
 recent commits (the searcher lives in `LuaRuntime::installResourceSearcher`).
@@ -1672,6 +1754,13 @@ official presets benefits automatically.
 - **No undo across regeneration.** `Ctrl+G` and `Ctrl+Shift+Alt+G`
   invalidate the editor's undo history (Qt limitation when
   `setPlainText` is used). Save before regenerating risky changes.
+- **Loop tick rate is fixed at 1/`ms-per-tick`**, not the device's
+  actual ~600 Hz. Scripts that count their own ticks internally
+  (everything using `ettot.at244hz` — torment, climb, combo, phasing2,
+  rhythm, orgasm, random2, stroke, intense) need **ms/tick ≤ 5** to
+  behave at intended speed. Default is 20, which works for tens, waves,
+  trifade and any custom script that doesn't rely on a high-rate
+  internal counter. See the FAQ entry above for symptoms and fix.
 
 ---
 
@@ -1737,6 +1826,11 @@ official presets benefits automatically.
 - **Sentinel block** — the `--[[ ZC95_TIMELINE_V1 … ]]` comment that
   carries the timeline editor's serialised project state inside the
   `.lua` script.
+- **Capture overlay** — the read-only ghost trace that **📸 Capture from
+  Sim** paints on the Timeline editor's lanes. Generated by running
+  the script in a sandbox `LuaRuntime` for one cycle and recording
+  every `ChannelOn` / `Off` / `PulseMs` it emits. Snapshot, not live —
+  re-click to refresh.
 - **TimelineParam** — a single event parameter (power / freq / width)
   that can either be a literal integer or a reference to a Lua
   variable name (e.g. `_intensity`). Lets timeline events react to

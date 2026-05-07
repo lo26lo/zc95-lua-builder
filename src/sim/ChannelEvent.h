@@ -15,6 +15,9 @@ enum class ChannelEventType {
     AccIoWrite,       // line in channel field, state in param1 (0/1)
     Print,            // text in textParam
     DelayMs,          // ms in param1
+    UserInput,        // user touched a control: short label in textParam,
+                      // category code in param1 (0=menu, 1=soft button,
+                      // 2=external trigger, 3=reset/setup marker).
 };
 
 struct ChannelEvent {

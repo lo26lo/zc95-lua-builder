@@ -57,6 +57,7 @@ private slots:
     void offerAutosaveRecovery();
     void onTimelinePushToLua();
     void onTimelinePullFromLua();
+    void onTimelineCaptureFromSim();
     void onTimelineProjectChanged();
     void openSafetyProfileDialog();
     void updateSafetyBadge();

@@ -2,6 +2,7 @@
 
 #include "../codegen/TimelineProject.h"
 #include "../model/MenuItem.h"
+#include "../sim/ChannelEvent.h"
 #include "TimelineEditorWidget.h"
 #include <QWidget>
 #include <QVector>
@@ -33,9 +34,24 @@ public:
     // from event params (e.g. "_intensity", "_speed").
     void setAvailableVariables(const QStringList& names);
 
+    // Forward a captured snapshot to the canvas. MainWindow runs the
+    // editor's current script in a sandbox after the user clicks
+    // "Capture from Sim", then calls this to render the trace.
+    void setCapturedEvents(const QVector<ChannelEvent>& events);
+    void clearCapturedEvents();
+
+    // Used by MainWindow when a Capture-from-Sim trace runs longer than
+    // the current cycle (slow ettot scripts often burst at t=20-50 s).
+    // Goes through the spin box so the change ends up undoable like a
+    // user edit.
+    void bumpCycleMsAtLeast(double ms);
+
 signals:
     void pushToLuaRequested();
     void pullFromLuaRequested();
+    // User clicked "Capture from Sim". MainWindow handles the actual
+    // sandboxed run because it owns the editor's source.
+    void captureFromSimRequested();
     void projectChanged();
 
 private slots:
@@ -63,9 +79,10 @@ private:
     // Project toolbar.
     QCheckBox*   m_loopCheck = nullptr;
     QSpinBox*    m_cycleSpin = nullptr;
-    QPushButton* m_pushBtn   = nullptr;
-    QPushButton* m_pullBtn   = nullptr;
-    QPushButton* m_clearBtn  = nullptr;
+    QPushButton* m_pushBtn    = nullptr;
+    QPushButton* m_pullBtn    = nullptr;
+    QPushButton* m_captureBtn = nullptr;
+    QPushButton* m_clearBtn   = nullptr;
 
     // Edit toolbar.
     QToolButton*  m_btnSelect = nullptr;

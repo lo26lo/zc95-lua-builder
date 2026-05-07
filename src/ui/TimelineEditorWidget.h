@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../codegen/TimelineProject.h"
+#include "../sim/ChannelEvent.h"
 #include <QWidget>
 #include <QStack>
 
@@ -75,6 +76,16 @@ public:
     void deleteSelected();
     void duplicateSelected();
 
+    // Read-only "ghost" overlay rendered behind editable events. Used to
+    // visualise what a dynamic script (tens.lua, climb.lua, …) actually
+    // does on the channels — those scripts compute schedules at runtime
+    // so they have no JSON sentinel to read. The overlay is a snapshot
+    // captured by MainWindow running the script in a sandboxed runtime;
+    // it does not refresh when the user moves a slider.
+    void setCapturedEvents(const QVector<ChannelEvent>& events);
+    void clearCapturedEvents();
+    bool hasCapturedEvents() const { return !m_capturedEvents.isEmpty(); }
+
 signals:
     // Project mutated (added / moved / resized / deleted / converted /
     // loop / cycle changed). Wrapper marks the document dirty.
@@ -124,6 +135,7 @@ private:
 
     void drawEmptyHint(QPainter& p);
     void drawEventLabel(QPainter& p, const TimelineEvent& e, const QRect& r);
+    void drawCapturedOverlay(QPainter& p);
 
     TimelineProject m_project;
     int             m_selected = -1;
@@ -152,4 +164,7 @@ private:
     QStack<TimelineProject> m_undoStack;
     QStack<TimelineProject> m_redoStack;
     static constexpr int kMaxUndoDepth = 100;
+
+    // Read-only ghost overlay (see setCapturedEvents).
+    QVector<ChannelEvent> m_capturedEvents;
 };

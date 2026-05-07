@@ -66,8 +66,10 @@ tweak it, and replay it.
   thin stripe and full power as a fat bar. **Live sliders / combos**
   in the simulator drive `MinMaxChange` and `MultiChoiceChange` in
   real time so you can test the script interactively without flashing.
-  The timeline auto-clears on every parameter change so you only see
-  the result of the *current* settings. A side **Variables** panel
+  Each user input (slider move, Soft Btn, Trigger 1A) drops a labelled
+  vertical marker on the timeline, so you can correlate cause and
+  effect at a glance. **Hover any segment** for exact start/end/power
+  values. A side **Variables** panel
   shows every `_` -prefixed Lua global live so you can watch your
   script's state evolve without `print()`.
 - **Lua 5.1 compat** — `module(…)`, `package.seeall` and `require("ettot")`
@@ -90,7 +92,11 @@ tweak it, and replay it.
     through an embedded JSON sentinel so you can keep editing visually
     after re-opening the file. Each event's power/freq/width can be
     either a literal value OR a reference to a form variable (e.g.
-    `_intensity`) for fully dynamic patterns.
+    `_intensity`) for fully dynamic patterns. **📸 Capture from Sim**
+    button overlays a read-only gray ghost trace of the script's
+    actual runtime behaviour — works on any script, including the
+    bundled official ones (`tens.lua`, `climb.lua`, …) that compute
+    their schedules dynamically and have no JSON sentinel to read.
 - **Safety guardrails** :
   - Linter warns on hard-coded high power, frequencies above 250 Hz,
     pulse widths above 200 µs, missing kill-switch, runaway `Loop()`

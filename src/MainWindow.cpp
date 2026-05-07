@@ -324,6 +324,8 @@ void MainWindow::connectSignals() {
                 this, &MainWindow::onTimelinePushToLua);
         connect(m_timelinePanel, &TimelineEditorPanel::pullFromLuaRequested,
                 this, &MainWindow::onTimelinePullFromLua);
+        connect(m_timelinePanel, &TimelineEditorPanel::captureFromSimRequested,
+                this, &MainWindow::onTimelineCaptureFromSim);
         connect(m_timelinePanel, &TimelineEditorPanel::projectChanged,
                 this, &MainWindow::onTimelineProjectChanged);
     }
@@ -690,6 +692,102 @@ void MainWindow::onTimelinePullFromLua() {
         QString("Timeline read from editor — %1 event(s).").arg(proj.events.size()), 4000);
 }
 
+void MainWindow::onTimelineCaptureFromSim() {
+    if (!m_timelinePanel || !m_editor) return;
+    QString src = m_editor->toPlainText();
+    if (src.trimmed().isEmpty()) {
+        statusBar()->showMessage("Capture: editor is empty.", 4000);
+        return;
+    }
+
+    double cycleMs = qBound(500.0, m_timelinePanel->project().cycleMs, 120000.0);
+    // Step size of 4 ms ≈ 250 Hz Loop frequency, close to the real
+    // device's ~600 Hz. Critical for scripts that count their own ticks
+    // at 244 Hz (ettot's at244hz family — torment, climb, combo, …): at
+    // the live simulator's default 20 ms/tick they undersample by ~5×
+    // and never reach their first state transition.
+    constexpr double kStepMs = 4.0;
+    // Always sample at least 60 s so slow ettot-family scripts have
+    // time to cross their first random block timer (5-25 s) and start
+    // emitting visible activity. If the user has a longer cycle we
+    // honour it; if shorter, we still capture 60 s and bump cycleMs
+    // afterwards so the trace fits.
+    double captureDurationMs = std::max(cycleMs, 60000.0);
+
+    LuaRuntime rt;
+    QString err;
+    if (!rt.loadScript(src, &err)) {
+        QMessageBox::warning(this, "Capture from Sim",
+            "Couldn't load the editor's script:\n" + err);
+        return;
+    }
+    if (!rt.callSetup(&err) && !err.isEmpty()) {
+        statusBar()->showMessage("Capture: Setup() error — " + err, 6000);
+    }
+
+    QVector<ChannelEvent> captured = rt.takeEvents();
+    int loopFailAt = -1;
+    for (double t = kStepMs; t <= captureDurationMs + 0.5; t += kStepMs) {
+        if (!rt.callLoop(t, &err)) {
+            loopFailAt = (int)t;
+            break;
+        }
+        rt.updatePulses();
+        captured += rt.takeEvents();
+    }
+
+    // Find the timestamp of the last channel-affecting event so we can
+    // tell the user how far the trace actually extends.
+    double lastChannelEventT = 0;
+    int channelEventCount = 0;
+    for (const auto& e : captured) {
+        bool isChannelEvent =
+            e.type == ChannelEventType::ChannelOn ||
+            e.type == ChannelEventType::ChannelOff ||
+            e.type == ChannelEventType::ChannelPulseMs;
+        if (isChannelEvent) {
+            ++channelEventCount;
+            if (e.timeMs > lastChannelEventT) lastChannelEventT = e.timeMs;
+        }
+    }
+
+    m_timelinePanel->setCapturedEvents(captured);
+
+    // Auto-grow the editor's cycle so the visible viewport actually
+    // shows the trace. Without this, slow scripts (torment, climb)
+    // produce a trace that extends to t=30-50 s but the user only sees
+    // the first 10 s of empty lanes — looks identical to "nothing
+    // happened".
+    bool cycleBumped = false;
+    if (lastChannelEventT > cycleMs) {
+        m_timelinePanel->bumpCycleMsAtLeast(lastChannelEventT);
+        cycleBumped = true;
+    }
+
+    QString msg;
+    if (loopFailAt >= 0) {
+        msg = QString("Capture: Loop() failed at t=%1 ms — %2 event(s) before failure.")
+                  .arg(loopFailAt).arg(captured.size());
+    } else if (channelEventCount == 0) {
+        msg = QString("Capture: %1 event(s), but none touch the channels — "
+                      "this script may need MinMaxChange / SoftButton input.")
+                  .arg(captured.size());
+    } else if (cycleBumped) {
+        msg = QString("Capture: %1 channel event(s), trace runs to %2 s — "
+                      "Cycle (ms) auto-bumped to fit.")
+                  .arg(channelEventCount).arg(lastChannelEventT / 1000.0, 0, 'f', 1);
+    } else if (lastChannelEventT < 100.0 && captureDurationMs > 1000.0) {
+        msg = QString("Capture: only %1 channel event(s), all in the first 100 ms. "
+                      "Script may be 'stuck off' — try the live simulator with "
+                      "ms/tick=4 and check the log for clues.")
+                  .arg(channelEventCount);
+    } else {
+        msg = QString("Capture: %1 ms · %2 channel event(s) overlaid in gray.")
+                  .arg((int)captureDurationMs).arg(channelEventCount);
+    }
+    statusBar()->showMessage(msg, 8000);
+}
+
 void MainWindow::onTimelineProjectChanged() {
     // The user is editing the timeline. Mark dirty so they don't lose
     // work unsaved, and update the sync badge (timeline diverges from
@@ -735,6 +833,7 @@ void MainWindow::newScript() {
     m_suppressDirty = false;
     setCurrentFile(QString());
     if (m_simPanel) m_simPanel->loadSourceSilent(m_editor->toPlainText());
+    if (m_timelinePanel) m_timelinePanel->clearCapturedEvents();
 }
 
 void MainWindow::newFromWizard() {
@@ -753,6 +852,7 @@ void MainWindow::newFromWizard() {
     setDirty(true);
     updateSyncIndicator();
     if (m_simPanel) m_simPanel->loadSourceSilent(src);
+    if (m_timelinePanel) m_timelinePanel->clearCapturedEvents();
     statusBar()->showMessage(
         "Wizard generated a script — read the comments, run Pre-flight, and try it in the simulator.",
         8000);
@@ -1077,6 +1177,7 @@ bool MainWindow::loadFile(const QString& path) {
     if (m_simPanel && m_simPanel->loadSourceSilent(source)) {
         fixupFormFromSimulator();
     }
+    if (m_timelinePanel) m_timelinePanel->clearCapturedEvents();
     return true;
 }
 
@@ -1290,6 +1391,7 @@ void MainWindow::loadOfficialScript(const QString& resourcePath) {
     if (m_simPanel && m_simPanel->loadSourceSilent(source)) {
         fixupFormFromSimulator();
     }
+    if (m_timelinePanel) m_timelinePanel->clearCapturedEvents();
     statusBar()->showMessage("Loaded official script: " + resourcePath, 3000);
 }
 
@@ -1356,5 +1458,6 @@ void MainWindow::loadPreset(const QString& presetName) {
     if (m_simPanel && m_simPanel->loadSourceSilent(m_editor->toPlainText())) {
         fixupFormFromSimulator();
     }
+    if (m_timelinePanel) m_timelinePanel->clearCapturedEvents();
     statusBar()->showMessage("Loaded preset: " + presetName, 3000);
 }

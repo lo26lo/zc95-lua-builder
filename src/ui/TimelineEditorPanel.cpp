@@ -19,6 +19,8 @@
 #include <QFrame>
 #include <QShortcut>
 #include <QKeySequence>
+#include <algorithm>
+#include <cmath>
 
 namespace {
 QToolButton* makeToolButton(const QString& label, const QString& tip,
@@ -29,7 +31,7 @@ QToolButton* makeToolButton(const QString& label, const QString& tip,
     b->setAutoRaise(false);
     b->setToolButtonStyle(Qt::ToolButtonTextOnly);
     b->setMinimumWidth(78);
-    b->setToolTip(QString("%1\nRaccourci : %2").arg(tip, shortcut));
+    b->setToolTip(QString("%1\nShortcut: %2").arg(tip, shortcut));
     group->addButton(b, id);
     return b;
 }
@@ -42,8 +44,8 @@ TimelineEditorPanel::TimelineEditorPanel(QWidget* parent) : QWidget(parent) {
 
     // ---- Beta banner ------------------------------------------------------
     auto* banner = new QLabel(
-        "<b>⚠ Fonction expérimentale (Beta)</b> — round-trip stable, "
-        "mais l'API peut encore évoluer. Toujours relire le Lua généré.",
+        "<b>⚠ Experimental feature (Beta)</b> — round-trip is stable, "
+        "but the API may still evolve. Always re-read the generated Lua.",
         this);
     banner->setWordWrap(true);
     banner->setStyleSheet(
@@ -73,6 +75,17 @@ TimelineEditorPanel::TimelineEditorPanel(QWidget* parent) : QWidget(parent) {
 
     projBar->addStretch();
 
+    m_captureBtn = new QPushButton("📸 Capture from Sim", this);
+    m_captureBtn->setToolTip(
+        "Run the current editor's script in a sandboxed runtime for the\n"
+        "configured cycle length, capture the ChannelOn / Off / PulseMs\n"
+        "events it emits, and overlay them on the lanes in dim green/orange\n"
+        "(read-only). Useful for previewing scripts that compute their\n"
+        "schedule dynamically (tens.lua, climb.lua, …) and have no JSON\n"
+        "sentinel to read.\n\n"
+        "Snapshot, not live: re-click after changing slider defaults.");
+    projBar->addWidget(m_captureBtn);
+
     m_pullBtn = new QPushButton("← Read from Lua", this);
     m_pullBtn->setToolTip(
         "Re-read the timeline JSON sentinel from the current editor.\n"
@@ -101,14 +114,14 @@ TimelineEditorPanel::TimelineEditorPanel(QWidget* parent) : QWidget(parent) {
 
     m_toolGroup = new QButtonGroup(this);
     m_toolGroup->setExclusive(true);
-    m_btnSelect = makeToolButton("↖ Select", "Sélectionner / déplacer un événement existant.\n"
-                                              "Clic vide = désélectionner.",   "S", m_toolGroup, 0);
-    m_btnPulse  = makeToolButton("▱ Pulse",  "Cliquer-glisser sur une lane pour créer une\n"
-                                              "impulsion (durée = longueur du drag).",  "P", m_toolGroup, 1);
-    m_btnOn     = makeToolButton("▶ On",     "Cliquer sur une lane pour poser un\n"
-                                              "ChannelOn à cet instant.",                  "O", m_toolGroup, 2);
-    m_btnOff    = makeToolButton("⏹ Off",    "Cliquer sur une lane pour poser un\n"
-                                              "ChannelOff à cet instant.",                 "F", m_toolGroup, 3);
+    m_btnSelect = makeToolButton("↖ Select", "Select / drag an existing event.\n"
+                                              "Click on empty lane = deselect.", "S", m_toolGroup, 0);
+    m_btnPulse  = makeToolButton("▱ Pulse",  "Click-drag on a lane to create a\n"
+                                              "Pulse (duration = drag length).", "P", m_toolGroup, 1);
+    m_btnOn     = makeToolButton("▶ On",     "Click on a lane to drop a\n"
+                                              "ChannelOn at that instant.",      "O", m_toolGroup, 2);
+    m_btnOff    = makeToolButton("⏹ Off",    "Click on a lane to drop a\n"
+                                              "ChannelOff at that instant.",     "F", m_toolGroup, 3);
     m_btnPulse->setChecked(true);  // matches widget default
     editBar->addWidget(m_btnSelect);
     editBar->addWidget(m_btnPulse);
@@ -130,8 +143,8 @@ TimelineEditorPanel::TimelineEditorPanel(QWidget* parent) : QWidget(parent) {
     m_snapCombo->addItem("1 s",     1000);
     m_snapCombo->setCurrentIndex(3);   // 100 ms default
     m_snapCombo->setToolTip(
-        "Pas de quantification pour création / déplacement / nudge.\n"
-        "Maintiens Shift pendant un drag pour le contourner ponctuellement.");
+        "Quantisation step for create / move / nudge.\n"
+        "Hold Shift during a drag to bypass it for that gesture.");
     editBar->addWidget(m_snapCombo);
 
     auto* sep2 = new QFrame(this);
@@ -141,17 +154,17 @@ TimelineEditorPanel::TimelineEditorPanel(QWidget* parent) : QWidget(parent) {
     m_timeLabel = new QLabel("t = —", this);
     m_timeLabel->setMinimumWidth(110);
     m_timeLabel->setStyleSheet("font-family: Consolas, 'Courier New'; color:#9bd1ff;");
-    m_timeLabel->setToolTip("Position temporelle sous le curseur (mise à jour au survol).");
+    m_timeLabel->setToolTip("Time position under the cursor (updated on hover).");
     editBar->addWidget(m_timeLabel);
 
     editBar->addStretch();
 
     m_undoBtn = new QPushButton("↶ Undo", this);
-    m_undoBtn->setToolTip("Annuler le dernier changement (Ctrl+Z)");
+    m_undoBtn->setToolTip("Undo the last change (Ctrl+Z)");
     m_undoBtn->setEnabled(false);
     editBar->addWidget(m_undoBtn);
     m_redoBtn = new QPushButton("↷ Redo", this);
-    m_redoBtn->setToolTip("Rétablir (Ctrl+Y)");
+    m_redoBtn->setToolTip("Redo (Ctrl+Y)");
     m_redoBtn->setEnabled(false);
     editBar->addWidget(m_redoBtn);
 
@@ -161,7 +174,7 @@ TimelineEditorPanel::TimelineEditorPanel(QWidget* parent) : QWidget(parent) {
 
     m_zoomOut = new QPushButton("−", this);
     m_zoomOut->setFixedWidth(28);
-    m_zoomOut->setToolTip("Zoom arrière");
+    m_zoomOut->setToolTip("Zoom out");
     editBar->addWidget(m_zoomOut);
     m_zoomLabel = new QLabel("100%", this);
     m_zoomLabel->setMinimumWidth(46);
@@ -170,10 +183,10 @@ TimelineEditorPanel::TimelineEditorPanel(QWidget* parent) : QWidget(parent) {
     editBar->addWidget(m_zoomLabel);
     m_zoomIn = new QPushButton("+", this);
     m_zoomIn->setFixedWidth(28);
-    m_zoomIn->setToolTip("Zoom avant");
+    m_zoomIn->setToolTip("Zoom in");
     editBar->addWidget(m_zoomIn);
     m_zoomFit = new QPushButton("Fit", this);
-    m_zoomFit->setToolTip("Ajuster à un cycle complet");
+    m_zoomFit->setToolTip("Fit to one full cycle");
     editBar->addWidget(m_zoomFit);
 
     outer->addLayout(editBar);
@@ -215,9 +228,10 @@ TimelineEditorPanel::TimelineEditorPanel(QWidget* parent) : QWidget(parent) {
     connect(m_loopCheck, &QCheckBox::toggled, this, &TimelineEditorPanel::onLoopToggled);
     connect(m_cycleSpin, qOverload<int>(&QSpinBox::valueChanged),
             this, &TimelineEditorPanel::onCycleChanged);
-    connect(m_pushBtn,  &QPushButton::clicked, this, &TimelineEditorPanel::pushToLuaRequested);
-    connect(m_pullBtn,  &QPushButton::clicked, this, &TimelineEditorPanel::pullFromLuaRequested);
-    connect(m_clearBtn, &QPushButton::clicked, this, &TimelineEditorPanel::onClearAll);
+    connect(m_pushBtn,    &QPushButton::clicked, this, &TimelineEditorPanel::pushToLuaRequested);
+    connect(m_pullBtn,    &QPushButton::clicked, this, &TimelineEditorPanel::pullFromLuaRequested);
+    connect(m_captureBtn, &QPushButton::clicked, this, &TimelineEditorPanel::captureFromSimRequested);
+    connect(m_clearBtn,   &QPushButton::clicked, this, &TimelineEditorPanel::onClearAll);
 
     connect(m_toolGroup, &QButtonGroup::idClicked,
             this, &TimelineEditorPanel::onToolButtonClicked);
@@ -254,6 +268,21 @@ void TimelineEditorPanel::setProject(const TimelineProject& p) {
 void TimelineEditorPanel::setAvailableVariables(const QStringList& names) {
     m_availableVars = names;
     rebuildPropertyPanel();
+}
+
+void TimelineEditorPanel::setCapturedEvents(const QVector<ChannelEvent>& events) {
+    m_canvas->setCapturedEvents(events);
+}
+
+void TimelineEditorPanel::clearCapturedEvents() {
+    m_canvas->clearCapturedEvents();
+}
+
+void TimelineEditorPanel::bumpCycleMsAtLeast(double ms) {
+    if (ms <= m_cycleSpin->value()) return;
+    int rounded = (int)std::ceil(ms / 5000.0) * 5000;
+    rounded = std::min(rounded, m_cycleSpin->maximum());
+    m_cycleSpin->setValue(rounded);   // fires onCycleChanged → undoable
 }
 
 void TimelineEditorPanel::onSelectionChanged(int) {

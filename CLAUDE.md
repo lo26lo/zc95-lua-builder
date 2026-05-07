@@ -90,8 +90,8 @@ go together by design).
   polyfill (`module`, `package.seeall`) + Qt-resource searcher for
   `require` + `extractScriptConfig` for ID resolution.
 - `src/ui/SimulatorPanel.{h,cpp}` — toolbar, channel state, live menu
-  controls, timeline, log, reset reload, `clearTimelineKeepingState`
-  for option-B parameter-change clearing, `testMenuItemDrive`.
+  controls, timeline, log, reset reload, `pushUserInput` to stamp
+  slider/button markers on the timeline, `testMenuItemDrive`.
 - `src/codegen/` — `LuaGenerator` (model → Lua + smart merge),
   `LuaParser` (regex, literal-only), `Linter` (incl. 7 safety rules),
   `ApiDoc`, `Explainer`, `LineDiff`.

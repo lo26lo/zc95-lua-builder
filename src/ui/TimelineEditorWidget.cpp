@@ -45,6 +45,17 @@ void TimelineEditorWidget::setProject(const TimelineProject& p) {
     update();
 }
 
+void TimelineEditorWidget::setCapturedEvents(const QVector<ChannelEvent>& events) {
+    m_capturedEvents = events;
+    update();
+}
+
+void TimelineEditorWidget::clearCapturedEvents() {
+    if (m_capturedEvents.isEmpty()) return;
+    m_capturedEvents.clear();
+    update();
+}
+
 void TimelineEditorWidget::applyProjectKeepHistory(const TimelineProject& p) {
     m_project = p;
     if (m_selected >= m_project.events.size()) {
@@ -253,20 +264,20 @@ void TimelineEditorWidget::drawEmptyHint(QPainter& p) {
     QString line1, line2;
     switch (m_tool) {
         case ToolSelect:
-            line1 = "Outil Select : choisis Pulse / On / Off dans la palette";
-            line2 = "puis clique sur une lane pour ajouter un événement.";
+            line1 = "Select tool: pick Pulse / On / Off from the palette,";
+            line2 = "then click on a lane to add an event.";
             break;
         case ToolPulse:
-            line1 = "Outil Pulse : clique-glisse sur une lane (CH1–CH4)";
-            line2 = "pour créer une impulsion. Shift = sans snap.";
+            line1 = "Pulse tool: click-drag on a lane (CH1–CH4) to create";
+            line2 = "a pulse. Hold Shift to bypass snap.";
             break;
         case ToolOn:
-            line1 = "Outil ChannelOn : clique sur une lane pour poser";
-            line2 = "un démarrage de canal à cet instant.";
+            line1 = "ChannelOn tool: click on a lane to drop a channel";
+            line2 = "start at that instant.";
             break;
         case ToolOff:
-            line1 = "Outil ChannelOff : clique sur une lane pour poser";
-            line2 = "un arrêt de canal à cet instant.";
+            line1 = "ChannelOff tool: click on a lane to drop a channel";
+            line2 = "stop at that instant.";
             break;
     }
     int y = (chartTop() + chartBottom()) / 2;
@@ -299,6 +310,81 @@ void TimelineEditorWidget::drawEventLabel(QPainter& p, const TimelineEvent& e, c
     }
     p.setPen(Qt::white);
     p.drawText(r, Qt::AlignCenter, lbl);
+    p.restore();
+}
+
+void TimelineEditorWidget::drawCapturedOverlay(QPainter& p) {
+    // Reconstruct on/off segments per channel by walking the captured
+    // event stream, exactly the same way the simulator timeline does.
+    // ChannelPulseMs becomes a sealed segment of param1 ms; ChannelOn /
+    // ChannelOff bracket sustained segments. We use the same colour
+    // language as the simulator (green = sustained, orange = pulse) but
+    // dimmed and semi-transparent so the user's editable events stay
+    // dominant.
+    struct Seg { double start; double end; bool isPulse; };
+    QVector<Seg> segs[kLaneCount];
+    bool on[kLaneCount] = {false, false, false, false};
+    double onSince[kLaneCount] = {0, 0, 0, 0};
+    bool isPulse[kLaneCount] = {false, false, false, false};
+
+    double maxT = 0;
+    for (const auto& e : m_capturedEvents) {
+        if (e.timeMs > maxT) maxT = e.timeMs;
+        if (e.channel < 1 || e.channel > kLaneCount) continue;
+        int idx = e.channel - 1;
+        if (e.type == ChannelEventType::ChannelOn) {
+            if (on[idx]) segs[idx].push_back({onSince[idx], e.timeMs, isPulse[idx]});
+            on[idx] = true;
+            onSince[idx] = e.timeMs;
+            isPulse[idx] = false;
+        } else if (e.type == ChannelEventType::ChannelOff) {
+            if (on[idx]) {
+                segs[idx].push_back({onSince[idx], e.timeMs, isPulse[idx]});
+                on[idx] = false;
+            }
+        } else if (e.type == ChannelEventType::ChannelPulseMs) {
+            segs[idx].push_back({e.timeMs, e.timeMs + e.param1, true});
+            if (e.timeMs + e.param1 > maxT) maxT = e.timeMs + e.param1;
+        }
+    }
+    // Close any still-on segment at maxT (the capture ends "now").
+    for (int i = 0; i < kLaneCount; ++i) {
+        if (on[i]) segs[i].push_back({onSince[i], maxT, isPulse[i]});
+    }
+
+    p.save();
+    // Slim band centred on the lane mid-line. Editable events are taller,
+    // so they visually stand on top of the ghost trace.
+    const QColor sustainCol(78, 201, 110, 110);   // dim green, ~43% alpha
+    const QColor pulseCol  (240, 160, 32, 150);   // dim orange, ~59% alpha
+    int lh = laneHeight();
+    int barH = qMax(4, lh / 4);
+    for (int ch = 1; ch <= kLaneCount; ++ch) {
+        int yMid = laneTop(ch) + lh / 2;
+        int yTop = yMid - barH / 2;
+        for (const auto& s : segs[ch - 1]) {
+            int x1 = timeToX(s.start);
+            int x2 = timeToX(s.end);
+            if (x2 < chartLeft() || x1 > chartRight()) continue;
+            x1 = qMax(x1, chartLeft());
+            x2 = qMin(x2, chartRight());
+            int w = qMax(2, x2 - x1);
+            p.fillRect(QRect(x1, yTop, w, barH), s.isPulse ? pulseCol : sustainCol);
+        }
+    }
+    // "Snapshot @ Xs" hint in the lower-right corner so the user knows
+    // the trace isn't live.
+    if (maxT > 0) {
+        p.setPen(QColor(150, 150, 150, 200));
+        QFont f("Segoe UI");
+        f.setPointSize(8);
+        f.setItalic(true);
+        p.setFont(f);
+        QString lbl = QString("Sim snapshot · %1 s · gray = script behaviour (read-only)")
+                          .arg(maxT / 1000.0, 0, 'f', 1);
+        p.drawText(QRect(chartLeft(), chartBottom() - 30, chartRight() - chartLeft(), 14),
+                   Qt::AlignRight | Qt::AlignVCenter, lbl);
+    }
     p.restore();
 }
 
@@ -385,8 +471,17 @@ void TimelineEditorWidget::paintEvent(QPaintEvent*) {
         p.drawLine(x, chartTop(), x, chartBottom());
     }
 
-    // Empty state hint when no events yet.
-    if (m_project.events.isEmpty()) {
+    // Captured ghost overlay — drawn before editable events so the user's
+    // events overlap on top. Only visible if MainWindow has pushed a
+    // capture (via "Capture from Sim").
+    if (!m_capturedEvents.isEmpty()) {
+        drawCapturedOverlay(p);
+    }
+
+    // Empty state hint when no events yet — but skip it when we have a
+    // capture overlay, otherwise the hint sits on top of meaningful data
+    // and is misleading.
+    if (m_project.events.isEmpty() && m_capturedEvents.isEmpty()) {
         drawEmptyHint(p);
     }
 

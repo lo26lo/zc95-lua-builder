@@ -47,7 +47,16 @@ SimulatorPanel::SimulatorPanel(QWidget* parent) : QWidget(parent) {
     m_stepMs->setSuffix(" ms/tick");
     m_stepMs->setToolTip(
         "Simulated milliseconds advanced per tick. Smaller = finer\n"
-        "resolution, slower wallclock progress. 20 ms is a good default.");
+        "resolution, slower wallclock progress. 20 ms is a good default\n"
+        "for most scripts.\n\n"
+        "BUT lower it to 4-5 ms for scripts that count their own ticks\n"
+        "at 244 Hz (the official torment / climb / combo / phasing /\n"
+        "rhythm / orgasm / random2 / stroke / intense scripts — anything\n"
+        "using ettot.at244hz). At 20 ms/tick those scripts undersample\n"
+        "their internal block timer by ~5× and never enter their main\n"
+        "pattern, so the channels look stuck OFF. The Timeline (Beta)'s\n"
+        "📸 Capture from Sim button forces dt=4 ms internally for the\n"
+        "same reason.");
     m_clock = new QLabel("t = 0.000s", this);
     m_clock->setStyleSheet("font-family: monospace;");
 
@@ -280,6 +289,7 @@ void SimulatorPanel::onTimerTick() {
 
 void SimulatorPanel::triggerSoftButton(bool pushed) {
     if (!m_loaded) return;
+    pushUserInput(1, pushed ? QStringLiteral("Soft↓") : QStringLiteral("Soft↑"));
     QString err;
     if (!m_runtime->callSoftButton(pushed, &err)) appendLogs("[ERROR] SoftButton: " + err);
     appendLogs(m_runtime->takeOutput());
@@ -289,6 +299,7 @@ void SimulatorPanel::triggerSoftButton(bool pushed) {
 
 void SimulatorPanel::triggerExternalA() {
     if (!m_loaded) return;
+    pushUserInput(2, QStringLiteral("Trig 1A"));
     QString err;
     m_runtime->callExternalTrigger("TRIGGER1", "A", true, &err);
     m_runtime->callExternalTrigger("TRIGGER1", "A", false, &err);
@@ -303,29 +314,19 @@ void SimulatorPanel::appendLogs(const QString& s) {
     emit log(s);
 }
 
-void SimulatorPanel::clearTimelineKeepingState() {
-    m_allEvents.clear();
-    // Re-seed: any channel that is currently ON gets a ChannelOn event
-    // stamped at the current simulated time, so its segment is drawn
-    // from t=now forward instead of disappearing entirely (matters for
-    // Constant patterns that turn channels ON once at Setup and never
-    // emit another event afterwards).
-    if (m_runtime) {
-        const auto& st = m_runtime->state();
-        double t = m_runtime->currentTimeMs();
-        for (int i = 0; i < 4; ++i) {
-            if (st.channels[i].on) {
-                ChannelEvent e;
-                e.timeMs = t;
-                e.type = ChannelEventType::ChannelOn;
-                e.channel = i + 1;
-                m_allEvents.push_back(e);
-            }
-        }
-        m_timeline->setEvents(m_allEvents, t);
-    } else {
-        m_timeline->clear();
-    }
+void SimulatorPanel::pushUserInput(int category, const QString& label) {
+    // A non-channel marker stamped at the current simulated time. The
+    // timeline draws these as vertical dashed lines + small labels so the
+    // user can correlate "I moved this slider" with "the pattern reacted
+    // like this". param1 is a category code shared with the renderer.
+    if (!m_runtime) return;
+    ChannelEvent e;
+    e.timeMs = m_runtime->currentTimeMs();
+    e.type = ChannelEventType::UserInput;
+    e.channel = 0;
+    e.param1 = category;
+    e.textParam = label;
+    m_allEvents.push_back(e);
 }
 
 void SimulatorPanel::refreshGlobals() {
@@ -503,14 +504,17 @@ void SimulatorPanel::setMenuItems(const QVector<MenuItem>& items) {
             m_menuLayout->addWidget(row);
 
             int menuId = mi.id;
-            connect(slider, &QSlider::valueChanged, this, [this, menuId, valLabel](int v) {
+            QString title = mi.title;
+            connect(slider, &QSlider::valueChanged, this, [this, menuId, title, valLabel](int v) {
                 valLabel->setText(QString::number(v));
                 emit liveMenuValueChanged(menuId, v);   // mirror on LCD preview
                 if (!m_loaded) return;
-                // Auto-clear the timeline so the user only sees activity
-                // produced by the new parameter value, not stale events
-                // from before the slider moved.
-                clearTimelineKeepingState();
+                // Stamp a marker on the timeline so the user can see where
+                // they moved the slider, then let the script react. The
+                // marker sits just before any zc.* events emitted by the
+                // MinMaxChange callback, which preserves causality on the
+                // chart.
+                pushUserInput(0, QString("%1=%2").arg(title).arg(v));
                 QString err;
                 if (!m_runtime->callMinMaxChange(menuId, v, &err)) {
                     appendLogs(QString("[ERROR] MinMaxChange(%1,%2): %3").arg(menuId).arg(v).arg(err));
@@ -543,12 +547,14 @@ void SimulatorPanel::setMenuItems(const QVector<MenuItem>& items) {
             m_menuLayout->addWidget(row);
 
             int menuId = mi.id;
+            QString title = mi.title;
             connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this,
-                [this, combo, menuId](int) {
+                [this, combo, menuId, title](int) {
                     int cid = combo->currentData().toInt();
+                    QString choiceText = combo->currentText();
                     emit liveMenuValueChanged(menuId, cid);
                     if (!m_loaded) return;
-                    clearTimelineKeepingState();
+                    pushUserInput(0, QString("%1=%2").arg(title, choiceText));
                     QString err;
                     if (!m_runtime->callMultiChoiceChange(menuId, cid, &err)) {
                         appendLogs(QString("[ERROR] MultiChoiceChange(%1,%2): %3").arg(menuId).arg(cid).arg(err));
